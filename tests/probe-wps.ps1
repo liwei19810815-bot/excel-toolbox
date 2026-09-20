@@ -36,7 +36,6 @@ $Xlam     = Join-Path $RepoRoot "dist\$OutputName"
 
 if (-not (Test-Path $Xlam)) { throw "找不到 $Xlam。请先运行 build\build.ps1。" }
 
-$preExisting = @(Get-Process EXCEL, et, wps -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 
 $script:rows = @()
 function Record([string]$item, [string]$result, [string]$detail = "") {
@@ -61,7 +60,12 @@ try {
     Write-Host "==> 连接 WPS 表格" -ForegroundColor Cyan
     # 【有意例外】：这里【不能】用 New-RealExcel——本脚本要的恰恰是 WPS。
     # 直接创建 COM，下面用 Test-IsWpsHost 做反向守卫（拿到真 Excel 反而报错）。
+    #
+    # 但进程回收【仍然走公共那一套】：登记本实例的 PID，收尾时只关它。
+    # 原先是按进程名把 EXCEL/et/wps 一把梭强杀，会连用户自己开着的
+    # WPS 文档一起干掉。
     $app = New-Object -ComObject Excel.Application
+    Register-ExcelInstance $app
 
     $path = ""; $name = ""; $ver = ""
     try { $path = $app.Path } catch {}
@@ -162,17 +166,7 @@ catch {
     Write-Host "探测中断：$($_.Exception.Message)" -ForegroundColor Red
 }
 finally {
-    if ($app) {
-        try { $app.DisplayAlerts = $false } catch {}
-        try { foreach ($w in @($app.Workbooks)) { try { $w.Close($false) } catch {} } } catch {}
-        try { $app.Quit() } catch {}
-        try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) } catch {}
-    }
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-    Start-Sleep -Milliseconds 600
-    Get-Process EXCEL, et, wps -ErrorAction SilentlyContinue |
-        Where-Object { $preExisting -notcontains $_.Id } |
-        ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
+    Close-ExcelInstance $app
 }
 
 Write-Host ""

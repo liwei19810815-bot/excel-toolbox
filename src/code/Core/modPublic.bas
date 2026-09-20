@@ -41,6 +41,109 @@ Public Sub Toolbox_ResetCaps()
     modCaps.Reset
 End Sub
 
+'------------------------------------------------------------------------------
+' 检查一批 imageMso 在【当前这台机器的 Excel】上是否存在。
+' 入参用 | 分隔，返回【不存在的那些】，同样用 | 分隔；全部存在则返回空串。
+'
+' 为什么要放在 VBA 里而不是让 PowerShell 直接调：
+'   GetImageMso 返回的是 IPictureDisp。跨进程 COM 把这个对象 marshal 回
+'   PowerShell 时会【直接挂死，而且不报错】——加了可见窗口和工作簿也一样。
+'   在进程内调用就没这个问题：VBA 只判断有没有抛错，不把图片对象传出去。
+'
+' 为什么需要这个检查：
+'   imageMso 无效时 Excel 只是【静默不画图标】，功能区照常加载、按钮照常能点，
+'   check-ribbon.ps1 照样报 ribbon=True。用户看到的是一排没有图标的按钮。
+'   而且同为 16.0，Microsoft 365 和 Excel 2021 的图标集并不一样——
+'   在 365 开发机上验过不等于在 2021 上没问题。
+'------------------------------------------------------------------------------
+Public Function Toolbox_CheckImageMso(ByVal idList As String) As String
+    Dim ids() As String, i As Long, one As String, buf As String
+
+    ids = Split(idList, "|")
+    For i = LBound(ids) To UBound(ids)
+        one = Trim$(ids(i))
+        If Len(one) > 0 Then
+            If Not ImageMsoExists(one) Then
+                If Len(buf) > 0 Then buf = buf & "|"
+                buf = buf & one
+            End If
+        End If
+    Next i
+
+    Toolbox_CheckImageMso = buf
+End Function
+
+' 【必须把常用尺寸都试一遍】。GetImageMso 是按尺寸取位图的，
+' 不少 ID（尤其是库/菜单型控件，如 ConditionalFormattingDataBars、
+' FunctionsInsertGallery）在 16×16 下取不到，换 32×32 就有。
+' 只试一个尺寸会把大量【确实存在】的 Excel 原生图标误判成不存在——
+' 第一版就是这么得出"13 个无效"的，差点照着那份假名单去改图标。
+'------------------------------------------------------------------------------
+' 把一批 imageMso 导出成 BMP 文件，供人肉眼比对。
+'
+' 为什么需要：挑图标时只能看见 ID 名字，看不见图。"TableEraser 到底长什么样"
+' 靠名字猜，结论就是各人猜各人的，争不出结果。导出来看一眼就定了。
+'
+' 入参 idList 用 | 分隔；返回实际导出成功的个数。
+' 文件名就是 ID 本身，放在 folderPath 下。
+'------------------------------------------------------------------------------
+Public Function Toolbox_DumpImageMso(ByVal idList As String, _
+                                     ByVal folderPath As String) As String
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(folderPath) Then fso.CreateFolder folderPath
+
+    Dim ids() As String, i As Long, one As String
+    Dim okCount As Long, failed As String
+
+    ids = Split(idList, "|")
+    For i = LBound(ids) To UBound(ids)
+        one = Trim$(ids(i))
+        If Len(one) > 0 Then
+            If DumpOne(one, folderPath & "\" & one & ".bmp") Then
+                okCount = okCount + 1
+            Else
+                If Len(failed) > 0 Then failed = failed & ","
+                failed = failed & one
+            End If
+        End If
+    Next i
+
+    Toolbox_DumpImageMso = "ok=" & okCount & "|failed=" & failed
+End Function
+
+Private Function DumpOne(ByVal idMso As String, ByVal outPath As String) As Boolean
+    Dim pic As Object
+    On Error GoTo Failed
+
+    ' 32×32 是功能区大按钮的尺寸，比对时看这个最贴近实际观感
+    Set pic = Application.CommandBars.GetImageMso(idMso, 32, 32)
+    If pic Is Nothing Then Exit Function
+
+    SavePicture pic, outPath
+    DumpOne = True
+    Exit Function
+
+Failed:
+    DumpOne = False
+End Function
+
+Private Function ImageMsoExists(ByVal idMso As String) As Boolean
+    If TryGetImage(idMso, 16) Then ImageMsoExists = True: Exit Function
+    If TryGetImage(idMso, 32) Then ImageMsoExists = True: Exit Function
+    If TryGetImage(idMso, 64) Then ImageMsoExists = True: Exit Function
+End Function
+
+Private Function TryGetImage(ByVal idMso As String, ByVal px As Long) As Boolean
+    Dim pic As Object
+    On Error GoTo NotFound
+    Set pic = Application.CommandBars.GetImageMso(idMso, px, px)
+    TryGetImage = Not (pic Is Nothing)
+    Exit Function
+NotFound:
+    TryGetImage = False
+End Function
+
 ' 所有已注册的 actionId，换行分隔。供测试脚本与 customUI14.xml 里的 tag 做一致性比对。
 Public Function Toolbox_ListActions() As String
     Toolbox_ListActions = modAction.AllActionIds()

@@ -30,8 +30,6 @@ $CodeDir  = Join-Path $RepoRoot "src\code"
 $files = Get-ChildItem -Path $CodeDir -Recurse -Include *.bas, *.cls, *.frm | Sort-Object FullName
 if ($Count -gt $files.Count) { $Count = $files.Count }
 
-# 记下调用前就存在的 Excel 进程，清理时避开它们（那可能是用户自己开着的）
-$preExisting = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 
 $xl = $null
 try {
@@ -74,16 +72,7 @@ catch {
     $script:code = 1
 }
 finally {
-    if ($xl) {
-        try { $xl.Quit() } catch {}
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
-    }
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-
-    Start-Sleep -Milliseconds 300
-    Get-Process EXCEL -ErrorAction SilentlyContinue |
-        Where-Object { $preExisting -notcontains $_.Id } |
-        ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
+    Close-ExcelInstance $xl
 }
 
 exit $script:code

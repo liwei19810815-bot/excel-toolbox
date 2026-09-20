@@ -88,14 +88,8 @@ catch {
 }
 finally {
     if ($xl) {
-        try { $xl.DisplayAlerts = $false } catch {}
-        try {
-            foreach ($w in @($xl.Workbooks)) { try { $w.Close($false) } catch {} }
-        } catch {}
-        try { $xl.Quit() } catch {}
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
+        Close-ExcelInstance $xl
     }
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
 }
 
 if ($failed) { exit 1 } else { exit 0 }

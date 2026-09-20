@@ -83,9 +83,5 @@ try {
     }
 }
 finally {
-    if ($xl) {
-        try { $xl.Quit() } catch {}
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
-    }
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+    Close-ExcelInstance $xl
 }

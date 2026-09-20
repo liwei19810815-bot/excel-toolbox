@@ -34,7 +34,6 @@ $Loader     = Join-Path $RepoRoot "dist\$LoaderName"
 
 if (-not (Test-Path $Payload)) { throw "找不到 $Payload。请先运行 build\build.ps1。" }
 
-$preExisting = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 $SandBox  = Join-Path $env:TEMP ("LoaderTest_" + [guid]::NewGuid().ToString("N"))
 $Share    = Join-Path $SandBox "share"
 $CacheDir = Join-Path $env:LOCALAPPDATA "ExcelToolbox"
@@ -322,11 +321,8 @@ try {
     # 和 tests\check-ribbon.ps1 需要可见 Excel 是同一类原因。
     Set-Manifest "9.0.0"
 
-    try { foreach ($w in @($xl.Workbooks)) { try { $w.Close($false) } catch {} } } catch {}
-    try { $xl.Quit() } catch {}
-    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
+    Close-ExcelInstance $xl
     $xl = $null
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
     Start-Sleep -Milliseconds 800
 
     $xl = New-RealExcel
@@ -353,16 +349,9 @@ catch {
 }
 finally {
     if ($xl) {
-        try { $xl.DisplayAlerts = $false } catch {}
-        try { foreach ($w in @($xl.Workbooks)) { try { $w.Close($false) } catch {} } } catch {}
-        try { $xl.Quit() } catch {}
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
+        Close-ExcelInstance $xl
     }
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
     Start-Sleep -Milliseconds 600
-    Get-Process EXCEL -ErrorAction SilentlyContinue |
-        Where-Object { $preExisting -notcontains $_.Id } |
-        ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
 
     # 还原开发机的缓存目录。
     # 刚杀掉的 Excel 释放文件句柄需要一点时间，直接复制会撞上

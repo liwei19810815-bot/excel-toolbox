@@ -35,7 +35,6 @@ $RibbonXml = Join-Path $RepoRoot "src\package\customUI\customUI14.xml"
 
 if (-not (Test-Path $Xlam)) { throw "找不到 $Xlam。请先运行 build\build.ps1。" }
 
-$preExisting = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 
 $script:pass = 0
 $script:fail = 0
@@ -787,16 +786,8 @@ catch {
 }
 finally {
     if ($xl) {
-        try { $xl.DisplayAlerts = $false } catch {}
-        try { foreach ($w in @($xl.Workbooks)) { try { $w.Close($false) } catch {} } } catch {}
-        try { $xl.Quit() } catch {}
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
+        Close-ExcelInstance $xl
     }
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-    Start-Sleep -Milliseconds 400
-    Get-Process EXCEL -ErrorAction SilentlyContinue |
-        Where-Object { $preExisting -notcontains $_.Id } |
-        ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
 }
 
 Write-Host ""

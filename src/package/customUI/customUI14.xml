@@ -16,6 +16,14 @@
       【下拉菜单要按内容起名】，不能四个组各放一个叫"更多"、图标还一样的抽屉——
       用户建立不起"某个功能在哪儿"的记忆，只能一个个点开找。
     - imageMso 用的是 Office 内置图标 ID，这样不必往包里塞图片资源。
+      【但 ID 必须验证过才能用】。写错或用了别的 Office 应用才有的 ID，
+      Excel 只是【静默不画图标】——功能区照常加载、按钮照常能点、
+      check-ribbon.ps1 照样报 ribbon=True，没有任何东西会报警，
+      用户看到的却是一排空白按钮。
+      这里曾经有 13 个 ID 是无效的（TableMerge / TableSplitCells 是 Word 表格命令；
+      CheckSpelling 在 Excel 里叫 Spelling；Repair、CurrencyOther 则纯属臆想），
+      在所有版本上都不显示，直到有人肉眼看了功能区才发现。
+      改动图标后必须跑：tests\check-imagemso.ps1
 -->
 <customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="Ribbon_OnLoad">
   <ribbon>
@@ -31,7 +39,7 @@
           <button id="btnResetEnv" tag="core.resetEnv" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="RefreshStatus"/>
+                  imageMso="Refresh"/>
         </group>
 
         <!-- ===================== 文本处理 ===================== -->
@@ -43,7 +51,7 @@
           <button id="btnToNumber" tag="text.toNumber" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="NumberFormatGeneral" size="large"/>
+                  imageMso="NumberFormatGallery" size="large"/>
           <menu id="mnuCase" label="大小写与全半角" imageMso="FontDialog" size="large">
             <button id="btnUpper" tag="text.toUpper" onAction="Ribbon_OnAction"
                     getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
@@ -73,7 +81,7 @@
                     getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                     getSupertip="Ribbon_GetSupertip"/>
           </menu>
-          <menu id="mnuTextMore" label="拆分与合并" imageMso="TableCellsSplit" size="large">
+          <menu id="mnuTextMore" label="拆分与合并" imageMso="MergeCells" size="large">
             <button id="btnAffix" tag="text.addAffix" onAction="Ribbon_OnAction"
                     getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                     getSupertip="Ribbon_GetSupertip"/>
@@ -113,8 +121,8 @@
           <button id="btnUnpivot" tag="data.unpivot" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="PivotTableLayoutTabularForm" size="large"/>
-          <menu id="mnuDataMore" label="去重与转置" imageMso="PivotTableLayoutCompactForm" size="large">
+                  imageMso="TableConvertToRange" size="large"/>
+          <menu id="mnuDataMore" label="去重与转置" imageMso="TableInsertExcel" size="large">
             <button id="btnDelEmptyCols" tag="data.deleteEmptyCols" onAction="Ribbon_OnAction"
                     getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                     getSupertip="Ribbon_GetSupertip"/>
@@ -139,11 +147,11 @@
           <button id="btnMergeSheets" tag="sheet.mergeAll" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="TableMerge" size="large"/>
+                  imageMso="Consolidate" size="large"/>
           <button id="btnSplitSheet" tag="sheet.splitByColumn" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="TableSplitCells" size="large"/>
+                  imageMso="TableSplitTable" size="large"/>
           <menu id="mnuSheetMore" label="工作表" imageMso="SheetInsert" size="large">
             <button id="btnIndex" tag="sheet.createIndex" onAction="Ribbon_OnAction"
                     getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
@@ -179,16 +187,16 @@
           <button id="btnAudit" tag="audit.scan" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="CheckSpelling" size="large"/>
+                  imageMso="ErrorChecking" size="large"/>
           <button id="btnQuickClean" tag="audit.quickClean" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="Repair" size="large"/>
+                  imageMso="TableEraser" size="large"/>
           <button id="btnToValues" tag="formula.toValues" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
                   imageMso="PasteValues" size="large"/>
-          <menu id="mnuFormulaMore" label="公式工具" imageMso="FunctionsInsertGallery" size="large">
+          <menu id="mnuFormulaMore" label="公式工具" imageMso="FunctionWizard" size="large">
             <button id="btnFindErrors" tag="formula.findErrors" onAction="Ribbon_OnAction"
                     getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                     getSupertip="Ribbon_GetSupertip"/>
@@ -216,11 +224,11 @@
           <button id="btnDataBars" tag="viz.dataBars" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="ConditionalFormattingDataBars" size="large"/>
+                  imageMso="ConditionalFormattingDataBarsGallery" size="large"/>
           <button id="btnColorScale" tag="viz.colorScale" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="ConditionalFormattingColorScales" size="large"/>
+                  imageMso="ConditionalFormattingColorScalesGallery" size="large"/>
           <button id="btnQuickChart" tag="viz.quickChart" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
@@ -248,11 +256,11 @@
                         onAction="Ribbon_OnToggle" getPressed="Ribbon_GetPressed"
                         getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                         getSupertip="Ribbon_GetSupertip"
-                        imageMso="LightingGallery" size="large"/>
+                        imageMso="Highlight" size="large"/>
           <button id="btnAmount" tag="misc.amountToChinese" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"
-                  imageMso="CurrencyOther" size="large"/>
+                  imageMso="AccountingFormat" size="large"/>
           <menu id="mnuMiscMore" label="身份证与日期" imageMso="DateAndTimeInsert" size="large">
             <button id="btnParseId" tag="misc.parseId" onAction="Ribbon_OnAction"
                     getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"

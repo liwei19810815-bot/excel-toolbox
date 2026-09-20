@@ -210,12 +210,8 @@ try {
 }
 finally {
     if ($wb) { try { $wb.Close($false) } catch {} }
-    if ($xl) {
-        try { $xl.EnableEvents = $true } catch {}
-        try { $xl.Quit() } catch {}
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
-    }
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+    if ($xl) { try { $xl.EnableEvents = $true } catch {} }
+    Close-ExcelInstance $xl
 }
 
 Write-Step "注入 Ribbon 定义"

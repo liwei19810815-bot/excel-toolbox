@@ -88,7 +88,6 @@ if ($wiringErrors.Count -gt 0) {
 }
 Write-Host "    $($seenTags.Count) 个按钮，回调接线完整" -ForegroundColor Green
 
-$preExisting = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 
 $ok = $false
 $xl = $null
@@ -123,16 +122,8 @@ catch {
 }
 finally {
     if ($xl) {
-        try { $xl.DisplayAlerts = $false } catch {}
-        try { foreach ($w in @($xl.Workbooks)) { try { $w.Close($false) } catch {} } } catch {}
-        try { $xl.Quit() } catch {}
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
+        Close-ExcelInstance $xl
     }
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-    Start-Sleep -Milliseconds 500
-    Get-Process EXCEL -ErrorAction SilentlyContinue |
-        Where-Object { $preExisting -notcontains $_.Id } |
-        ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
 }
 
 if ($ok) { exit 0 } else { exit 1 }

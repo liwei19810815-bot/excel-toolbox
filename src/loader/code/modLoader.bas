@@ -30,6 +30,11 @@ Private Const MANIFEST_NAME As String = "manifest.txt"
 Private Const PAYLOAD_PREFIX As String = "ExcelToolbox_"
 Private Const PAYLOAD_EXT As String = ".xlam"
 
+' 载荷自检串里用来确认"这确实是本工具箱"的标识。
+' 必须和载荷侧 modApp.APP_ID 保持一致——加载器和载荷是两个独立工程，
+' 这里引用不到那边的常量，只能各存一份。
+Private Const PAYLOAD_APP_ID As String = "ExcelToolbox"
+
 Private mPayloadWb As Workbook
 
 ' 最近一次更新的结果。内网支持同事时，"没更新成功"必须能说清是哪一种：
@@ -68,6 +73,112 @@ Public Sub Startup()
     End If
 
     OpenPayload localPath
+
+    ' 【顺序不能反】：必须确认新版本真的跑起来了，才能删旧版本。
+    ' 在那之前，旧版本是唯一的退路。
+    If VerifyPayloadRuns() Then PurgeOldPayloads localPath
+
+    On Error GoTo 0
+End Sub
+
+'------------------------------------------------------------------------------
+' 确认刚打开的载荷【真的能运行】，而不只是"文件打开成功"。
+'
+' 光看 Workbooks.Open 有没有报错是不够的：一个 VBA 工程编译不过的 .xlam
+' 照样能被打开，只是里面一行代码都跑不了。拿这种状态去删旧版本，
+' 等于把唯一能用的版本删掉，换来一个打得开但没功能的空壳。
+'
+' 所以这里真的去调一次载荷里的自检函数——能返回就说明工程编译通过、
+' 宏可执行、入口点齐全。
+'------------------------------------------------------------------------------
+Private Function VerifyPayloadRuns() As Boolean
+    If mPayloadWb Is Nothing Then Exit Function
+
+    Dim reply As String
+    On Error GoTo NotRunning
+    reply = CStr(Application.Run("'" & mPayloadWb.Name & "'!Toolbox_SelfCheck"))
+
+    ' 【只看开头是不是 "OK" 太松了】。自检串的格式是
+    '     OK|ExcelToolbox|1.0.0|host=...|actions=59|...
+    ' 要删掉用户唯一的退路，判据就得严一点：除了 OK 之外，
+    ' 还要确认这确实是本工具箱的载荷、且命令注册表非空——
+    ' 一个编译通过但注册表是空的载荷，装上了也没有任何按钮可用。
+    If Left$(reply, 3) <> "OK|" Then GoTo NotRunning
+    If InStr(1, reply, "|" & PAYLOAD_APP_ID & "|", vbTextCompare) = 0 Then GoTo NotRunning
+
+    Dim actionsPos As Long
+    actionsPos = InStr(1, reply, "actions=", vbTextCompare)
+    If actionsPos = 0 Then GoTo NotRunning
+    If Val(Mid$(reply, actionsPos + Len("actions="))) <= 0 Then GoTo NotRunning
+
+    VerifyPayloadRuns = True
+    Exit Function
+
+NotRunning:
+    mLastUpdateNote = "新版本自检未通过，保留旧版本缓存：" & Left$(reply, 120)
+    VerifyPayloadRuns = False
+End Function
+
+'------------------------------------------------------------------------------
+' 删除缓存目录里除【当前正在用的这一个】之外的所有历史载荷。
+'
+' 为什么可以只留一个：当前这个版本已经验证过能跑，它就是下一次升级失败时的退路。
+' 再往前的版本没有任何价值，只是在用户的 %LOCALAPPDATA% 里越堆越多——
+' 每个约 250KB，几十个版本之后在漫游配置文件和瘦客户端上是会有感的。
+'
+' 两条硬约束：
+'   1.【删不掉就跳过，绝不能让启动失败】。别的 Excel 实例可能正开着旧版本，
+'      文件被占用。那不是错误，下次启动再删就是了。
+'   2.【只认自己的命名规则】。缓存目录里万一有别的东西，不关我们的事。
+'------------------------------------------------------------------------------
+Private Sub PurgeOldPayloads(ByVal activePath As String)
+    On Error Resume Next
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If fso Is Nothing Then Exit Sub
+
+    Dim dirPath As String
+    dirPath = CacheDir()
+    If Not fso.FolderExists(dirPath) Then Exit Sub
+
+    Dim activeName As String
+    activeName = LCase$(fso.GetFileName(activePath))
+
+    Dim f As Object, nameOnly As String
+    Dim deleted As Long, skipped As String
+    For Each f In fso.GetFolder(dirPath).Files
+        nameOnly = fso.GetFileName(f.Path)
+
+        If LCase$(nameOnly) <> activeName _
+           And Left$(nameOnly, Len(PAYLOAD_PREFIX)) = PAYLOAD_PREFIX _
+           And LCase$(Right$(nameOnly, Len(PAYLOAD_EXT))) = LCase$(PAYLOAD_EXT) Then
+
+            Err.Clear
+            fso.DeleteFile f.Path, True
+
+            ' 【删不掉恰恰说明别人正用着它，这是安全行为不是错误】。
+            ' Windows 会锁住被 Excel 打开的文件，所以"另一个实例正开着旧版本"
+            ' 这种情况下 DeleteFile 必然失败——不需要额外的占用检测，
+            ' 文件锁本身就是那道保险。跳过即可，下次启动再删。
+            '
+            ' 但【要记下来】：静默吞掉的话，缓存一直清不干净时没人知道为什么。
+            If Err.Number <> 0 Then
+                If Len(skipped) > 0 Then skipped = skipped & ", "
+                skipped = skipped & nameOnly
+                Err.Clear
+            Else
+                deleted = deleted + 1
+            End If
+        End If
+    Next f
+
+    If deleted > 0 Or Len(skipped) > 0 Then
+        mLastUpdateNote = mLastUpdateNote & _
+            IIf(Len(mLastUpdateNote) > 0, "；", "") & _
+            "清理旧版本：删除 " & deleted & " 个" & _
+            IIf(Len(skipped) > 0, "，跳过（被占用）：" & skipped, "")
+    End If
 
     On Error GoTo 0
 End Sub
