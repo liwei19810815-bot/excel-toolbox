@@ -173,6 +173,141 @@ try {
     Assert-Equal "True"  (Get-Field $st "payloadOpen") "仍然可用"
 
     #==========================================================================
+    Section "并发：两个 Excel 进程同时升级"
+
+    # 早上九点几十号人同时开 Excel 是常态，不是边缘场景。
+    # 固定临时文件名的话，A 正在写、B 一上来就把它删了重写，
+    # 两边再交错改名，最后谁也说不清缓存里那个文件是完整的还是拼出来的。
+    Publish-Version "9.2.0"
+    Remove-Item (Join-Path $CacheDir "ExcelToolbox_9.2.0.xlam") -Force -ErrorAction SilentlyContinue
+
+    # 另起两个独立 Excel 进程，同时打开加载器并触发更新
+    $concurrent = @(1, 2) | ForEach-Object {
+        Start-Job -ArgumentList $Loader, $LoaderName -ScriptBlock {
+            param($loaderPath, $loaderName)
+            $x = New-Object -ComObject Excel.Application
+            $x.Visible = $false
+            $x.DisplayAlerts = $false
+            $x.EnableEvents = $false
+            try {
+                $null = $x.Workbooks.Add(-4167)
+                $null = $x.Workbooks.Open($loaderPath)
+                $x.EnableEvents = $true
+                $r = $x.Run("'$loaderName'!Loader_CheckNow")
+                return "$r"
+            }
+            finally {
+                try { foreach ($w in @($x.Workbooks)) { try { $w.Close($false) } catch {} } } catch {}
+                try { $x.Quit() } catch {}
+                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($x)
+            }
+        }
+    }
+    $results = $concurrent | Wait-Job -Timeout 180 | Receive-Job
+    $concurrent | Remove-Job -Force -ErrorAction SilentlyContinue
+
+    # 两个进程都应该拿到可用的载荷，并且缓存里不能留下任何半截文件
+    $okCount = @($results | Where-Object { "$_" -like "*已加载*" }).Count
+    Assert-Equal 2 $okCount "两个进程都成功加载了载荷"
+
+    $leftovers = @(Get-ChildItem $CacheDir -Filter "*.part" -ErrorAction SilentlyContinue)
+    Assert-Equal 0 $leftovers.Count "并发后没有残留的 .part 临时文件"
+
+    $finalFile = Join-Path $CacheDir "ExcelToolbox_9.2.0.xlam"
+    Assert-Equal $true (Test-Path $finalFile) "缓存里有最终文件"
+    Assert-Equal (Get-Item $Payload).Length (Get-Item $finalFile).Length "缓存文件大小与源文件一致（不是半截文件）"
+
+    #==========================================================================
+    Section "发布中断：清单绝不先于载荷生效"
+
+    # publish.ps1 先把载荷原子放好，最后才改清单。
+    # 所以任何时刻清单指向的版本，一定已经完整可用。
+    $pubShare = Join-Path $SandBox "pubtest"
+    New-Item -ItemType Directory -Path $pubShare -Force | Out-Null
+
+    # 模拟"上一次发布传到一半就断了"：目录里留一个半截的 .uploading 文件
+    Set-Content (Join-Path $pubShare "ExcelToolbox_1.0.0.xlam.abc123.uploading") "半截文件"
+    [System.IO.File]::WriteAllText((Join-Path $pubShare "manifest.txt"), "8.0.0",
+                                   (New-Object System.Text.UTF8Encoding($false)))
+
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "build\publish.ps1") `
+        -SharePath $pubShare -Version "8.1.0" 2>&1 | Out-Null
+
+    $pubManifest = (Get-Content (Join-Path $pubShare "manifest.txt") -Raw).Trim()
+    Assert-Equal "8.1.0" $pubManifest "发布后清单指向新版本"
+    $pubPayload = Join-Path $pubShare "ExcelToolbox_8.1.0.xlam"
+    Assert-Equal $true (Test-Path $pubPayload) "载荷已就位"
+    Assert-Equal (Get-Item $Payload).Length (Get-Item $pubPayload).Length "发布的载荷完整（大小一致）"
+    $stale = @(Get-ChildItem $pubShare -Filter "*.uploading" -ErrorAction SilentlyContinue)
+    Assert-Equal 1 $stale.Count "上次中断留下的半截文件不会被当成有效版本（仍在原地，未被清单引用）"
+
+    # 同一版本号重复发布必须被拒绝：否则同一版本在不同机器上内容不同，无法追溯。
+    # publish.ps1 是用 throw 拒绝的，这里要接住，否则会被当成测试自身失败。
+    $dupOut = ""
+    try {
+        $dupOut = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "build\publish.ps1") `
+            -SharePath $pubShare -Version "8.1.0" 2>&1 | Out-String
+    }
+    catch { $dupOut = $_.Exception.Message }
+    Assert-Equal $true ("$dupOut" -like "*已存在*") "拒绝重复发布同一版本号"
+
+    #==========================================================================
+    Section "断网 + 缓存损坏：大小达标但内容已坏"
+
+    # 这是 Major 级别的场景：断网时比不了源文件大小，如果只看大小下限，
+    # 一个被磁盘错误或杀毒软件截断的 xlam 会被当成完好的直接打开，
+    # 用户看到的是"文件已损坏"，还完全不知道为什么。
+    # 判据里的 zip 魔数检查就是为这个场景准备的。
+    $corruptVer = "9.5.0"
+    $corruptPath = Join-Path $CacheDir "ExcelToolbox_$corruptVer.xlam"
+    # 造一个足够大（远超 8192）但不是 zip 的文件
+    [System.IO.File]::WriteAllBytes($corruptPath, (New-Object byte[] 40960))
+
+    $OfflineB = $Share + "_offline2"
+    Rename-Item $Share $OfflineB
+    try {
+        $null = & $CheckNow
+        $st = & $Status
+        Write-Host "  $st" -ForegroundColor DarkGray
+        # 9.5.0 是缓存里"最新"的版本，但它是坏的，必须被跳过
+        Assert-Equal $true ((Get-Field $st "active") -ne $corruptVer) "损坏的缓存不会被当成可用版本打开"
+        Assert-Equal "True" (Get-Field $st "payloadOpen") "仍然加载了其它完好的缓存版本"
+    }
+    finally {
+        Rename-Item $OfflineB $Share
+        Remove-Item $corruptPath -Force -ErrorAction SilentlyContinue
+    }
+
+    #==========================================================================
+    Section "严格/宽松完整性判据"
+
+    # 发布目录里放一个"大小够大但不是 zip"的假载荷。
+    # 复制下来之后要走严格模式自检，必须被拒绝——绝不能让它进缓存被打开。
+    $badVer = "9.8.0"
+    [System.IO.File]::WriteAllBytes((Join-Path $Share "ExcelToolbox_$badVer.xlam"),
+                                    (New-Object byte[] 40960))
+    Set-Manifest $badVer
+
+    $null = & $CheckNow
+    $st = & $Status
+    Write-Host "  $st" -ForegroundColor DarkGray
+    Assert-Equal $true ((Get-Field $st "active") -ne $badVer) "损坏的新载荷不会被采用"
+    Assert-Equal "True" (Get-Field $st "payloadOpen") "仍然保有可用的工具箱"
+    Assert-Equal $false (Test-Path (Join-Path $CacheDir "ExcelToolbox_$badVer.xlam")) "损坏的载荷没有留在缓存里"
+
+    $leftovers2 = @(Get-ChildItem $CacheDir -Filter "*.part" -ErrorAction SilentlyContinue)
+    Assert-Equal 0 $leftovers2.Count "自检失败后临时文件已清理"
+
+    Remove-Item (Join-Path $Share "ExcelToolbox_$badVer.xlam") -Force -ErrorAction SilentlyContinue
+
+    # 宽松方向：正在被另一个 Excel 打开的缓存，不能因为"读不出来"就被判成损坏。
+    # 这正是两轮前的误杀 bug —— 当时同事开两个 Excel 窗口就会中招。
+    Set-Manifest "9.1.0"
+    $null = & $CheckNow
+    $st = & $Status
+    Assert-Equal "9.1.0" (Get-Field $st "active") "已打开的缓存版本仍可正常使用（不会被误判为损坏）"
+
+    #==========================================================================
     Section "真实启动路径：Workbook_Open 自动拉取（可见模式）"
 
     # 这是"用户无感"的关键路径，必须真的验一次。

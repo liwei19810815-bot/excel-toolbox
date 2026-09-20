@@ -371,16 +371,33 @@ Failed:
     errDesc = Err.Description
     errSrc = Err.Source                  ' 没有来源的错误信息在无头调试时几乎无法定位
 
-    ' 用户在参数输入框上点了取消：不是错误，回滚后安静退出，不弹框也不留撤销步骤
+    ' 用户在参数输入框上点了取消：正常情况下安静退出，不弹框也不留撤销步骤。
+    '
+    ' 但【回滚失败必须说】：取消发生在业务代码已经改了一部分之后，
+    ' 回滚又没成功的话，数据就停在中间状态。这时候还安静退出，
+    ' 用户会以为"我取消了所以什么都没发生"——那是最危险的误解。
     If errNum = modPrompt.ERR_CANCELLED Then
+        Dim cancelRollbackOk As Boolean
+        cancelRollbackOk = True
         If txOpened Then
             On Error Resume Next
-            modUndo.Rollback
+            cancelRollbackOk = modUndo.Rollback()
+            If Err.Number <> 0 Then cancelRollbackOk = False
+            Err.Clear
             On Error GoTo 0
         End If
+
         modPerf.ClearStatus
         modPerf.FastModeOff
-        mLastMessage = "CANCELLED"
+        modRibbon.RefreshControl "btnUndoLast"
+
+        If cancelRollbackOk Then
+            mLastMessage = "CANCELLED"
+        Else
+            mLastMessage = "CANCELLED_ROLLBACK_FAILED"
+            Notify "「" & d.Label & "」已取消，但【回滚失败】。" & vbCrLf & vbCrLf & _
+                   "数据可能停在中间状态，请立即检查，必要时关闭文件不保存。", vbCritical
+        End If
         Exit Sub
     End If
 
