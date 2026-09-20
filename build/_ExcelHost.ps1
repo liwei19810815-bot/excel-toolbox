@@ -146,6 +146,28 @@ function Get-ExcelProcessId {
     return 0
 }
 
+# 登记失败时的兜底：把刚创建、还没来得及登记的实例就地关掉。
+#
+# 【不做这件事，"报错"本身就会制造孤儿】——登记失败抛异常，而那个 Excel
+# 已经起来了、又没进 $script:ExcelOwned，Close-ExcelInstance 不认识它，
+# 于是它永远留在后台。这正是我们要消灭的东西。
+function Stop-UnregisteredExcel {
+    param($App, [int]$ProcId)
+
+    if ($App) {
+        try { $App.DisplayAlerts = $false } catch {}
+        try { $App.Quit() } catch {}
+        try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($App) } catch {}
+    }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+
+    if ($ProcId -gt 0) {
+        $p = $null
+        try { $p = Get-Process -Id $ProcId -ErrorAction SilentlyContinue } catch {}
+        if ($p) { try { Stop-Process -Id $ProcId -Force } catch {} }
+    }
+}
+
 function Register-ExcelInstance {
     param($App)
 
@@ -154,30 +176,49 @@ function Register-ExcelInstance {
         # 【不能默默放过】。登记不上意味着这个实例没人负责回收，
         # 脚本被 timeout 打断时它就永远留在后台，还会占住 .xlam 让后续构建失败。
         # 宁可当场失败，也不要留一个查不出来的隐患。
-        throw "取不到 Excel 实例的进程 ID（Hwnd 始终为 0）。中止，以免留下无法回收的孤儿进程。"
+        Stop-UnregisteredExcel $App 0
+        throw "取不到 Excel 实例的进程 ID（Hwnd 始终为 0）。已关闭该实例并中止。"
     }
 
-    $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-    if (-not $p) { throw "进程 $procId 已不存在，Excel 实例创建异常。" }
-
-    $script:ExcelOwned += [pscustomobject]@{ Id = $procId; Ticks = $p.StartTime.Ticks }
-
-    if (-not (Test-Path $script:ExcelLockDir)) {
-        $null = New-Item -ItemType Directory -Path $script:ExcelLockDir -Force
+    $p = $null
+    try { $p = Get-Process -Id $procId -ErrorAction SilentlyContinue } catch {}
+    if (-not $p) {
+        Stop-UnregisteredExcel $App $procId
+        throw "进程 $procId 已不存在，Excel 实例创建异常。"
     }
 
-    # 立刻落盘：中途被 timeout 打断也还有据可查。
-    # 【先写临时文件再改名】——Set-Content 不是原子的，写到一半被打断
-    # 会留下一个半截文件，下一轮解析不出来，等于没登记。
-    $lines = @($script:ExcelOwned | ForEach-Object { "$($_.Id)|$($_.Ticks)" })
-    $tmp = "$script:ExcelLockFile.tmp"
-    Set-Content -LiteralPath $tmp -Encoding ASCII -Value $lines
-    Move-Item -LiteralPath $tmp -Destination $script:ExcelLockFile -Force
+    $startTicks = 0L
+    try { $startTicks = $p.StartTime.Ticks } catch {
+        Stop-UnregisteredExcel $App $procId
+        throw "取不到进程 $procId 的启动时间，无法安全登记。已关闭该实例并中止。"
+    }
 
-    # 回读确认内容真的写进去了，而不只是文件存在
-    $back = @(Get-Content -LiteralPath $script:ExcelLockFile -ErrorAction SilentlyContinue)
-    if (($back -join "`n") -ne ($lines -join "`n")) {
-        throw "PID 登记文件回读不一致：$script:ExcelLockFile"
+    $script:ExcelOwned += [pscustomobject]@{ Id = $procId; Ticks = $startTicks }
+
+    # 从这里往下任何失败，都必须把实例收掉再抛
+    try {
+        if (-not (Test-Path $script:ExcelLockDir)) {
+            $null = New-Item -ItemType Directory -Path $script:ExcelLockDir -Force
+        }
+
+        # 立刻落盘：中途被 timeout 打断也还有据可查。
+        # 【先写临时文件再改名】——Set-Content 不是原子的，写到一半被打断
+        # 会留下一个半截文件，下一轮解析不出来，等于没登记。
+        $lines = @($script:ExcelOwned | ForEach-Object { "$($_.Id)|$($_.Ticks)" })
+        $tmp = "$script:ExcelLockFile.tmp"
+        Set-Content -LiteralPath $tmp -Encoding ASCII -Value $lines
+        Move-Item -LiteralPath $tmp -Destination $script:ExcelLockFile -Force
+
+        # 回读确认内容真的写进去了，而不只是文件存在
+        $back = @(Get-Content -LiteralPath $script:ExcelLockFile -ErrorAction SilentlyContinue)
+        if (($back -join "`n") -ne ($lines -join "`n")) {
+            throw "PID 登记文件回读不一致：$script:ExcelLockFile"
+        }
+    }
+    catch {
+        $script:ExcelOwned = @($script:ExcelOwned | Where-Object { $_.Id -ne $procId })
+        Stop-UnregisteredExcel $App $procId
+        throw "登记 Excel 进程失败，已关闭该实例：$($_.Exception.Message)"
     }
 }
 
@@ -205,9 +246,20 @@ function Close-ExcelInstance {
 
         # 【要等它真的退出再往下走】。Stop-Process 是异步的，立刻去删锁文件
         # 就会出现"锁文件没了、进程还在"的窗口——那正是孤儿逃掉的缝隙。
-        try { $p.WaitForExit(5000) | Out-Null } catch {}
-        if (-not $p.HasExited) {
-            Write-Host "    警告：Excel 进程 $($p.Id) 未能退出，锁文件保留以便下轮回收。" -ForegroundColor DarkYellow
+        #
+        # HasExited 在进程对象失效时会抛异常，必须包起来；
+        # 判断不了就按"没退出"处理——保留锁文件总比漏掉一个孤儿强。
+        $exited = $false
+        try {
+            $p.WaitForExit(5000) | Out-Null
+            $exited = $p.HasExited
+        }
+        catch {
+            $exited = -not (Get-Process -Id $o.Id -ErrorAction SilentlyContinue)
+        }
+
+        if (-not $exited) {
+            Write-Host "    警告：Excel 进程 $($o.Id) 未能退出，锁文件保留以便下轮回收。" -ForegroundColor DarkYellow
             return      # 保留锁文件，下一轮 Clear-StaleExcel 会再收一次
         }
     }

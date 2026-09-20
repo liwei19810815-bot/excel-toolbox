@@ -106,10 +106,20 @@ Private Function VerifyPayloadRuns() As Boolean
     If Left$(reply, 3) <> "OK|" Then GoTo NotRunning
     If InStr(1, reply, "|" & PAYLOAD_APP_ID & "|", vbTextCompare) = 0 Then GoTo NotRunning
 
-    Dim actionsPos As Long
+    ' 【actions= 的取值要严格校验，不能用 Val】。
+    ' Val("12garbage") 返回 12，于是一个畸形的自检串也能判通过——
+    ' 而我们正要拿这个结论去删用户唯一的退路。
+    ' 取到下一个 "|" 为止，必须整段都是数字且大于 0。
+    Dim actionsPos As Long, actionsText As String, sepPos As Long
     actionsPos = InStr(1, reply, "actions=", vbTextCompare)
     If actionsPos = 0 Then GoTo NotRunning
-    If Val(Mid$(reply, actionsPos + Len("actions="))) <= 0 Then GoTo NotRunning
+
+    actionsText = Mid$(reply, actionsPos + Len("actions="))
+    sepPos = InStr(actionsText, "|")
+    If sepPos > 0 Then actionsText = Left$(actionsText, sepPos - 1)
+
+    If Not IsAllDigits(actionsText) Then GoTo NotRunning
+    If CLng(actionsText) <= 0 Then GoTo NotRunning
 
     VerifyPayloadRuns = True
     Exit Function
@@ -117,6 +127,44 @@ Private Function VerifyPayloadRuns() As Boolean
 NotRunning:
     mLastUpdateNote = "新版本自检未通过，保留旧版本缓存：" & Left$(reply, 120)
     VerifyPayloadRuns = False
+End Function
+
+Private Function IsAllDigits(ByVal txt As String) As Boolean
+    Dim i As Long, ch As String
+    If Len(txt) = 0 Then Exit Function
+    For i = 1 To Len(txt)
+        ch = Mid$(txt, i, 1)
+        If ch < "0" Or ch > "9" Then Exit Function
+    Next i
+    IsAllDigits = True
+End Function
+
+'------------------------------------------------------------------------------
+' 这个文件现在有没有人在用？
+'
+' 【不能靠"DeleteFile 失败就说明被占用"来反推】：删除失败也可能是权限、
+' 杀毒软件拦截或瞬时 I/O 错误，把这些都当成"别人正用着"就说不通；
+' 反过来，删除成功也不代表没有别的进程刚要去打开它。
+'
+' 用 VBA 的 Open ... Lock Read Write 去拿【独占锁】才是真的探测：
+' 拿得到说明此刻没有任何进程打开它；拿不到（错误 70）就说明有人占着。
+' 拿到之后立刻关掉，再删——窗口缩到最小。
+'------------------------------------------------------------------------------
+Private Function CanTakeExclusiveLock(ByVal filePath As String) As Boolean
+    Dim fileNum As Integer
+
+    On Error GoTo Busy
+    fileNum = FreeFile
+    Open filePath For Binary Access Read Write Lock Read Write As #fileNum
+    Close #fileNum
+    CanTakeExclusiveLock = True
+    Exit Function
+
+Busy:
+    On Error Resume Next
+    Close #fileNum
+    On Error GoTo 0
+    CanTakeExclusiveLock = False
 End Function
 
 '------------------------------------------------------------------------------
@@ -154,21 +202,23 @@ Private Sub PurgeOldPayloads(ByVal activePath As String)
            And Left$(nameOnly, Len(PAYLOAD_PREFIX)) = PAYLOAD_PREFIX _
            And LCase$(Right$(nameOnly, Len(PAYLOAD_EXT))) = LCase$(PAYLOAD_EXT) Then
 
-            Err.Clear
-            fso.DeleteFile f.Path, True
-
-            ' 【删不掉恰恰说明别人正用着它，这是安全行为不是错误】。
-            ' Windows 会锁住被 Excel 打开的文件，所以"另一个实例正开着旧版本"
-            ' 这种情况下 DeleteFile 必然失败——不需要额外的占用检测，
-            ' 文件锁本身就是那道保险。跳过即可，下次启动再删。
-            '
-            ' 但【要记下来】：静默吞掉的话，缓存一直清不干净时没人知道为什么。
-            If Err.Number <> 0 Then
+            ' 先确认此刻没有任何进程打开它，再删。
+            ' 另一个 Excel 实例可能正开着这个旧版本载荷——那是别人还在用的东西。
+            If Not CanTakeExclusiveLock(f.Path) Then
                 If Len(skipped) > 0 Then skipped = skipped & ", "
-                skipped = skipped & nameOnly
-                Err.Clear
+                skipped = skipped & nameOnly & "(占用中)"
             Else
-                deleted = deleted + 1
+                Err.Clear
+                fso.DeleteFile f.Path, True
+                ' 删除本身仍可能失败（权限、杀毒拦截），照样如实记下来，
+                ' 不能静默吞掉——否则缓存一直清不干净时没人知道为什么
+                If Err.Number <> 0 Then
+                    If Len(skipped) > 0 Then skipped = skipped & ", "
+                    skipped = skipped & nameOnly & "(" & Err.Number & ")"
+                    Err.Clear
+                Else
+                    deleted = deleted + 1
+                End If
             End If
         End If
     Next f

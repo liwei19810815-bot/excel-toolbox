@@ -48,6 +48,68 @@ $Here       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AddInsDir  = Join-Path $env:APPDATA "Microsoft\AddIns"
 $CacheDir   = Join-Path $env:LOCALAPPDATA "ExcelToolbox"
 
+#-----------------------------------------------------------------------------
+# 可靠地关掉【本程序自己创建的】那个 Excel 实例。
+#
+# 为什么不能只调 Quit()：注册加载项之后 Excel 会立刻加载它，加载器的
+# Workbook_Open 又会打开载荷工作簿。这种状态下 Quit() 不一定能让进程退出——
+# 实测会留下一个标题为"Excel 开始屏幕"的进程赖在后台，
+# 接着就把下一次安装/卸载卡死在"检测到 Excel 正在运行"。
+#
+# 安装包是单独发给业务用户的，不能依赖仓库里的 _ExcelHost.ps1，
+# 所以这里自带一份精简实现。
+#
+# 【只动自己创建的那个 PID】：从 Application.Hwnd 反查，绝不按进程名杀，
+# 否则会连用户自己开着的 Excel 一起干掉。
+#-----------------------------------------------------------------------------
+if (-not ([System.Management.Automation.PSTypeName]'ToolboxSetup.Win32').Type) {
+    Add-Type -Namespace ToolboxSetup -Name Win32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern int GetWindowThreadProcessId(System.IntPtr hWnd, out int lpdwProcessId);
+'@
+}
+
+function Get-OwnExcelPid {
+    param($App)
+    for ($i = 0; $i -lt 10; $i++) {
+        try {
+            $hwnd = [System.IntPtr]::new([int]$App.Hwnd)
+            if ($hwnd -ne [System.IntPtr]::Zero) {
+                $procId = 0
+                [void][ToolboxSetup.Win32]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+                if ($procId -gt 0) { return $procId }
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 200
+    }
+    return 0
+}
+
+function Stop-ExcelSafely {
+    param($App, [int]$OwnPid)
+
+    if ($App) {
+        try { $App.DisplayAlerts = $false } catch {}
+        try { foreach ($w in @($App.Workbooks)) { try { $w.Close($false) } catch {} } } catch {}
+        try { $App.Quit() } catch {}
+        try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($App) } catch {}
+    }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+
+    if ($OwnPid -le 0) { return }
+
+    # 给它几秒自己退；退不掉就强制结束——那是本程序起的实例，不是用户的
+    for ($i = 0; $i -lt 10; $i++) {
+        $p = Get-Process -Id $OwnPid -ErrorAction SilentlyContinue
+        if (-not $p) { return }
+        Start-Sleep -Milliseconds 500
+    }
+    $p = Get-Process -Id $OwnPid -ErrorAction SilentlyContinue
+    if ($p -and $p.ProcessName -eq 'EXCEL') {
+        try { Stop-Process -Id $OwnPid -Force } catch {}
+    }
+}
+
 function Say      ($m) { Write-Host $m }
 function Step     ($m) { Write-Host "`n>> $m" -ForegroundColor Cyan }
 function Good     ($m) { Write-Host "   [完成] $m" -ForegroundColor Green }
@@ -74,10 +136,21 @@ if (-not $Uninstall) {
             exit 1
         }
         if ($found.Count -gt 1) {
-            # 有主加载宏和瘦加载器两个时，优先装加载器（它带自动更新）
-            $loader = $found | Where-Object { $_.Name -like "*Loader*" } | Select-Object -First 1
-            $pick = if ($loader) { $loader } else { $found[0] }
-            Warn "找到多个加载宏，将安装：$($pick.Name)"
+            # 【同时出现多个是打包出错】。正式分发包里应该只放一个：
+            # 要么独立版 ExcelToolbox.xlam，要么带自动更新的 ExcelToolboxLoader.xlam。
+            #
+            # 真遇到了就【优先装独立版】，不要自作主张装加载器——
+            # 加载器启动时要去共享目录拉载荷，共享目录没配好或连不上时
+            # 它会弹对话框，而模态框会把整个自动安装流程卡死
+            # （实测就是这么失败的：Installed 属性设不进去）。
+            # 独立版没有这个依赖，装上就能用，是更安全的默认。
+            $standalone = $found | Where-Object { $_.Name -notlike "*Loader*" } | Select-Object -First 1
+            $pick = if ($standalone) { $standalone } else { $found[0] }
+            Warn "这个文件夹里有多个加载宏（正式分发包应该只放一个）。"
+            Say  "     将安装：$($pick.Name)"
+            if ($pick.Name -like "*Loader*") {
+                Say  "     注意：加载器版需要能访问发布共享目录，否则启动时会报错。"
+            }
             $Source = $pick.FullName
         } else {
             $Source = $found[0].FullName
@@ -89,6 +162,35 @@ if (-not $Uninstall) {
         exit 1
     }
     $AddinName = Split-Path -Leaf $Source
+}
+
+#-----------------------------------------------------------------------------
+# 卸载时要卸掉【实际装进去的那个】，不能写死文件名。
+#
+# 本程序可能装的是 ExcelToolbox.xlam，也可能是带自动更新的
+# ExcelToolboxLoader.xlam（安装时会优先选后者）。卸载默认死 ExcelToolbox.xlam
+# 的话，装了加载器的机器上会卸不干净：文件还在、加载项还勾着，
+# 用户以为卸载成功了。
+#
+# 判断依据是加载项目录里实际存在哪些属于本工具箱的文件。
+#-----------------------------------------------------------------------------
+if ($Uninstall -and -not $AddinName) {
+    $installed = @(Get-ChildItem -LiteralPath $AddInsDir -Filter "ExcelToolbox*.xlam" -ErrorAction SilentlyContinue)
+    if ($installed.Count -eq 0) {
+        Say ""
+        Say "加载项目录里没有找到本工具箱的文件，可能已经卸载过了。"
+        Say "仍会继续清理受信任位置和缓存目录。"
+        $AddinName = "ExcelToolbox.xlam"      # 占位，后面的删除步骤会走"本来就不存在"分支
+    }
+    elseif ($installed.Count -eq 1) {
+        $AddinName = $installed[0].Name
+    }
+    else {
+        # 两个都装过（比如先试了独立版又换成加载器版），一并卸掉
+        Warn "检测到多个已安装的加载宏，将全部卸载：$(($installed.Name) -join ', ')"
+        $AddinName = $installed[0].Name
+        $script:ExtraToRemove = @($installed | Select-Object -Skip 1 | ForEach-Object { $_.Name })
+    }
 }
 
 if (-not $AddinName) { $AddinName = "ExcelToolbox.xlam" }
@@ -123,33 +225,38 @@ Good "Excel 未运行"
 # 卸载
 #=============================================================================
 if ($Uninstall) {
+    $toRemove = @($AddinName)
+    if ($script:ExtraToRemove) { $toRemove += $script:ExtraToRemove }
+
     Step "取消勾选并删除加载宏"
     $xl = $null
+    $xlPid = 0
     try {
         $xl = New-Object -ComObject Excel.Application
+        $xlPid = Get-OwnExcelPid $xl
         $xl.Visible = $false
         $xl.DisplayAlerts = $false
         foreach ($a in @($xl.AddIns)) {
             try {
-                if ($a.Name -eq $AddinName) { $a.Installed = $false }
+                if ($toRemove -contains $a.Name) { $a.Installed = $false }
             } catch {}
         }
     }
     catch { Warn "无法通过 Excel 取消勾选：$($_.Exception.Message)" }
     finally {
-        if ($xl) {
-            try { $xl.Quit() } catch {}
-            try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($xl) } catch {}
-        }
-        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+        Stop-ExcelSafely $xl $xlPid
     }
 
-    if (Test-Path -LiteralPath $Dest) {
-        Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $Dest) { Warn "文件删除失败：$Dest" } else { Good "已删除 $AddinName" }
-    } else {
-        Good "加载宏文件本来就不存在"
+    $anyRemoved = $false
+    foreach ($n in $toRemove) {
+        $path = Join-Path $AddInsDir $n
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path) { Warn "文件删除失败：$path" }
+            else { Good "已删除 $n"; $anyRemoved = $true }
+        }
     }
+    if (-not $anyRemoved) { Good "加载宏文件本来就不存在" }
 
     # 【卸载必须把安全设置也撤掉】。装的时候改了 Excel 的受信任位置，
     # 卸载却留着，等于在用户机器上留下一条他不知情、也没人再需要的安全豁免。
@@ -209,6 +316,8 @@ Step "复制到加载项目录"
 if (-not (Test-Path -LiteralPath $AddInsDir)) {
     $null = New-Item -ItemType Directory -Path $AddInsDir -Force
 }
+# 记下复制之前那里有没有文件：失败回滚时要知道该删掉还是该还原
+$destExistedBefore = Test-Path -LiteralPath $Dest
 try {
     Copy-Item -LiteralPath $Source -Destination $Dest -Force -ErrorAction Stop
     Unblock-File -LiteralPath $Dest -ErrorAction SilentlyContinue
@@ -220,10 +329,12 @@ try {
 
 Step "在 Excel 中启用加载项"
 $xl = $null
+$xlPid = 0
 $registered = $false
 $excelVersion = ""
 try {
     $xl = New-Object -ComObject Excel.Application
+    $xlPid = Get-OwnExcelPid $xl
     $xl.Visible = $false
     $xl.DisplayAlerts = $false
     try { $excelVersion = [string]$xl.Version } catch {}
@@ -261,11 +372,30 @@ catch {
     Bad "自动启用失败：$($_.Exception.Message)"
 }
 finally {
-    if ($xl) {
-        try { $xl.Quit() } catch {}
-        try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($xl) } catch {}
+    # 【注册完必须确保这个实例真的退出】。启用加载项会让 Excel 立刻加载它，
+    # 加载器的 Workbook_Open 又会打开载荷工作簿，此时 Quit() 不一定能退出——
+    # 实测留下过一个"Excel 开始屏幕"进程赖在后台，
+    # 把下一次安装/卸载直接卡死在"检测到 Excel 正在运行"。
+    Stop-ExcelSafely $xl $xlPid
+}
+
+# 【注册失败就把刚复制进去的文件收回来】。
+#
+# 留着它是最坏的结果：文件在加载项目录里、但没被勾选，用户看不到任何效果；
+# 而下次再装时又会走"同名记录"那条分支，把问题搅得更复杂。
+# 如果那个位置本来就有文件（覆盖安装），则不动——那是用户原有的东西。
+if (-not $registered -and -not $destExistedBefore) {
+    Step "回滚已复制的文件"
+    Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Dest) {
+        Warn "回滚失败，文件仍在：$Dest"
+    } else {
+        Good "已移除 $Dest"
     }
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+}
+elseif (-not $registered -and $destExistedBefore) {
+    Warn "启用失败。加载项目录里原本就有同名文件，已被本次安装覆盖，未做回滚。"
+    Say  "     位置：$Dest"
 }
 
 # 【注册失败就不要再改安全设置】。否则会留下最糟糕的中间状态：
