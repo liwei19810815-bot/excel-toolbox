@@ -1,0 +1,5 @@
+dist/
+tests/output/
+~$*
+*.tmp
+.vs/

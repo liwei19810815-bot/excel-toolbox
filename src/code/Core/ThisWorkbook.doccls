@@ -1,0 +1,11 @@
+' ThisWorkbook 文档模块。
+' 文档模块无法用 Import 覆盖，build.ps1 通过 CodeModule.AddFromString 注入本文件内容。
+Option Explicit
+
+Private Sub Workbook_Open()
+    modApp.App_Startup
+End Sub
+
+Private Sub Workbook_BeforeClose(Cancel As Boolean)
+    modApp.App_Shutdown
+End Sub
