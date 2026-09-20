@@ -129,7 +129,10 @@ function Clear-StaleExcel {
 #
 # 【要重试】：Hwnd 在实例刚创建的一瞬间可能还是 0，窗口尚未建好。
 # 第一版拿到 0 就放弃登记，那个实例此后就成了无人认领的孤儿。
-function Get-ExcelProcessId {
+# 返回 @{ Id = <pid>; Ticks = <启动时间> }，取不到返回 $null。
+# 【PID 和启动时间必须一起取】：后面任何强制结束都要靠这两项确认身份，
+# 只带 PID 的话，PID 被系统回收复用后就会误杀一个无关进程。
+function Get-ExcelIdentity {
     param($App, [int]$Retries = 10)
 
     for ($i = 0; $i -lt $Retries; $i++) {
@@ -138,12 +141,15 @@ function Get-ExcelProcessId {
             if ($hwnd -ne [System.IntPtr]::Zero) {
                 $procId = 0
                 [void][ExcelToolbox.Win32]::GetWindowThreadProcessId($hwnd, [ref]$procId)
-                if ($procId -gt 0) { return $procId }
+                if ($procId -gt 0) {
+                    $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                    if ($p) { return @{ Id = $procId; Ticks = $p.StartTime.Ticks } }
+                }
             }
         } catch {}
         Start-Sleep -Milliseconds 200
     }
-    return 0
+    return $null
 }
 
 # 这个 PID 现在还活着吗？
@@ -165,19 +171,32 @@ function Test-ProcessAlive {
     }
 }
 
-# 这个进程确实是我们登记的那一个吗？
-# 【PID + 进程名 + 启动时间三者都要对上】——PID 会被系统回收复用，
-# 只认 PID 就可能杀掉一个恰好拿到同一号码的无关进程。
-function Test-OwnedProcess {
+# 登记的这个进程现在是什么状态？返回四种之一：
+#
+#   Gone     明确已经不存在了 —— 收工，可以清登记
+#   Ours     还在，且确认就是我们启动的那个 —— 该关它
+#   NotOurs  还在，但 PID 被复用成了别的进程 —— 别碰
+#   Unknown  查不出来 —— 【既不能杀，也不能当它已经没了】
+#
+# 【为什么必须有 Unknown 这一态】：只用"有/没有"两态的话，
+# Get-Process 查询【本身失败】（权限、WMI 抽风）会被当成"进程不存在"，
+# 于是登记被清、锁文件被删，而那个 Excel 其实还活着——孤儿就是这么漏掉的。
+# 判断不了的时候，唯一安全的做法是什么都别做、把锁文件留给下一轮。
+function Get-OwnedProcessState {
     param($Owned)
+
+    $p = $null
+    try { $p = Get-Process -Id $Owned.Id -ErrorAction Stop }
+    catch [Microsoft.PowerShell.Commands.ProcessCommandException] { return 'Gone' }
+    catch { return 'Unknown' }
+
     try {
-        $p = Get-Process -Id $Owned.Id -ErrorAction SilentlyContinue
-        if (-not $p) { return $false }
-        if ($p.ProcessName -ne 'EXCEL' -and $p.ProcessName -notin @('et','wps')) { return $false }
-        if ($p.StartTime.Ticks -ne $Owned.Ticks) { return $false }
-        return $true
+        if ($p.ProcessName -ne 'EXCEL' -and $p.ProcessName -notin @('et','wps')) { return 'NotOurs' }
+        # PID 会被系统回收复用，只认 PID 就可能杀掉一个恰好拿到同一号码的无关进程
+        if ($p.StartTime.Ticks -ne $Owned.Ticks) { return 'NotOurs' }
+        return 'Ours'
     }
-    catch { return $false }    # 属性读不到就不动它，宁可不杀也不误杀
+    catch { return 'Unknown' }   # 属性读不到，判断不了
 }
 
 # 登记失败时的兜底：把刚创建、还没来得及登记的实例就地关掉。
@@ -186,7 +205,7 @@ function Test-OwnedProcess {
 # 已经起来了、又没进 $script:ExcelOwned，Close-ExcelInstance 不认识它，
 # 于是它永远留在后台。这正是我们要消灭的东西。
 function Stop-UnregisteredExcel {
-    param($App, [int]$ProcId)
+    param($App, $Own)
 
     if ($App) {
         try { $App.DisplayAlerts = $false } catch {}
@@ -195,45 +214,33 @@ function Stop-UnregisteredExcel {
     }
     [GC]::Collect(); [GC]::WaitForPendingFinalizers()
 
-    if ($ProcId -gt 0) {
-        # 【杀之前确认它确实是个 Excel/WPS 进程】。这个 PID 是几秒前从活着的
-        # COM 对象上取到的，复用概率极低，但一次误杀的代价是用户的未保存文件，
-        # 所以还是要认一下身份再动手。
-        try {
-            $p = Get-Process -Id $ProcId -ErrorAction SilentlyContinue
-            if ($p -and ($p.ProcessName -eq 'EXCEL' -or $p.ProcessName -in @('et','wps'))) {
-                Stop-Process -Id $ProcId -Force
-            }
-        } catch {}
+    if (-not $Own) { return }
+
+    # 【强杀前走同一套三重身份校验】。这个 PID 虽然是几秒前从活着的 COM 对象上
+    # 取到的、复用概率极低，但一次误杀的代价是用户未保存的文件，
+    # 所以不给它开特例——和 Close-ExcelInstance 用同一个判据。
+    if ((Get-OwnedProcessState $Own) -eq 'Ours') {
+        try { Stop-Process -Id $Own.Id -Force } catch {}
     }
 }
 
 function Register-ExcelInstance {
     param($App)
 
-    $procId = Get-ExcelProcessId $App
-    if ($procId -le 0) {
+    # 一次拿全身份（PID + 启动时间）。取不到就没法安全回收，直接失败。
+    $own = Get-ExcelIdentity $App
+    if (-not $own) {
         # 【不能默默放过】。登记不上意味着这个实例没人负责回收，
         # 脚本被 timeout 打断时它就永远留在后台，还会占住 .xlam 让后续构建失败。
         # 宁可当场失败，也不要留一个查不出来的隐患。
-        Stop-UnregisteredExcel $App 0
-        throw "取不到 Excel 实例的进程 ID（Hwnd 始终为 0）。已关闭该实例并中止。"
+        #
+        # 这里身份都拿不到，所以只能靠 Quit 收（传 $null，不做强杀）。
+        Stop-UnregisteredExcel $App $null
+        throw "取不到 Excel 实例的进程身份（Hwnd 或启动时间不可用）。已尝试关闭并中止。"
     }
+    $procId = $own.Id
 
-    $p = $null
-    try { $p = Get-Process -Id $procId -ErrorAction SilentlyContinue } catch {}
-    if (-not $p) {
-        Stop-UnregisteredExcel $App $procId
-        throw "进程 $procId 已不存在，Excel 实例创建异常。"
-    }
-
-    $startTicks = 0L
-    try { $startTicks = $p.StartTime.Ticks } catch {
-        Stop-UnregisteredExcel $App $procId
-        throw "取不到进程 $procId 的启动时间，无法安全登记。已关闭该实例并中止。"
-    }
-
-    $script:ExcelOwned += [pscustomobject]@{ Id = $procId; Ticks = $startTicks }
+    $script:ExcelOwned += [pscustomobject]@{ Id = $own.Id; Ticks = $own.Ticks }
 
     # 从这里往下任何失败，都必须把实例收掉再抛
     try {
@@ -257,7 +264,7 @@ function Register-ExcelInstance {
     }
     catch {
         $script:ExcelOwned = @($script:ExcelOwned | Where-Object { $_.Id -ne $procId })
-        Stop-UnregisteredExcel $App $procId
+        Stop-UnregisteredExcel $App $own
         throw "登记 Excel 进程失败，已关闭该实例：$($_.Exception.Message)"
     }
 }
@@ -277,10 +284,17 @@ function Close-ExcelInstance {
     Start-Sleep -Milliseconds 500
 
     foreach ($o in $script:ExcelOwned) {
-        # 【进程属性访问全部要保护】。进程可能在 Get-Process 之后、读属性之前
-        # 就退出了，那时访问 ProcessName / StartTime 会抛异常，
-        # 整个清理循环就断在这里，后面的实例一个都收不掉。
-        if (-not (Test-OwnedProcess $o)) { continue }
+        $state = Get-OwnedProcessState $o
+
+        if ($state -eq 'Gone')    { continue }   # 已经没了，正常
+        if ($state -eq 'NotOurs') { continue }   # PID 被复用，不关我们的事
+
+        if ($state -eq 'Unknown') {
+            # 查不出状态就【什么都别做】：不杀（可能误伤），也不清登记
+            # （可能它还活着）。锁文件留着，下一轮 Clear-StaleExcel 再判。
+            Write-Host "    警告：无法确认 Excel 进程 $($o.Id) 的状态，锁文件保留以便下轮回收。" -ForegroundColor DarkYellow
+            return
+        }
 
         try { Stop-Process -Id $o.Id -Force } catch {}
 
