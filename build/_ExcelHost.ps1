@@ -99,29 +99,56 @@ function Clear-StaleExcel {
 
     foreach ($f in (Get-ChildItem -LiteralPath $script:ExcelLockDir -Filter "run_*.txt" -ErrorAction SilentlyContinue)) {
         # 文件名里的是创建者 PowerShell 的 PID。它还活着就说明那一轮还在跑，别碰。
+        #
+        # 【这里同样不能用"查不到就当它没了"】：Test-ProcessAlive 在查询失败时
+        # 返回 $true（按还活着处理），于是我们会跳过这个锁文件而不是抢它的进程。
         $ownerPid = 0
         if ($f.BaseName -match '^run_(\d+)$') { $ownerPid = [int]$Matches[1] }
         if ($ownerPid -eq $PID) { continue }
-        if ($ownerPid -gt 0 -and (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)) { continue }
+        if ($ownerPid -gt 0 -and (Test-ProcessAlive $ownerPid)) { continue }
+
+        # 【锁文件能不能删，取决于里面每一条都处理干净了】。
+        # 原来是不管结果如何都删——只要有一条查询失败（被当成"进程不存在"而跳过），
+        # 那个仍然活着的 Excel 就此失去锁记录，再没有任何一轮能追踪到它。
+        $allResolved = $true
 
         foreach ($line in (Get-Content -LiteralPath $f.FullName -ErrorAction SilentlyContinue)) {
             # 每行格式：<pid>|<启动时间 ticks>
             $parts = $line -split '\|'
-            if ($parts.Count -ne 2) { continue }
+            if ($parts.Count -ne 2) { continue }      # 格式坏了，这条没法追，不算未处理
 
-            $p = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
-            if (-not $p -or $p.ProcessName -ne 'EXCEL') { continue }
-
-            # PID 可能被复用，必须连启动时间一起对上才敢动手
+            $pid2 = 0
             $ticks = 0L
+            if (-not [int]::TryParse($parts[0], [ref]$pid2))   { continue }
             if (-not [long]::TryParse($parts[1], [ref]$ticks)) { continue }
-            if ($p.StartTime.Ticks -ne $ticks) { continue }
 
-            Write-Host ("    回收上一轮遗留的 Excel 进程 {0}" -f $p.Id) -ForegroundColor DarkYellow
-            try { Stop-Process -Id $p.Id -Force } catch {}
+            $owned = @{ Id = $pid2; Ticks = $ticks }
+            switch (Get-OwnedProcessState $owned) {
+                'Gone'    { }                          # 早就没了，这条处理完了
+                'NotOurs' { }                          # PID 被复用，与我们无关
+                'Ours'    {
+                    Write-Host ("    回收上一轮遗留的 Excel 进程 {0}" -f $pid2) -ForegroundColor DarkYellow
+                    try { Stop-Process -Id $pid2 -Force } catch {}
+                    # Stop-Process 是异步的，给它一点时间再确认；
+                    # 没确认退出就不能算处理完，锁文件得留着
+                    $gone = $false
+                    for ($k = 0; $k -lt 6; $k++) {
+                        if (-not (Test-ProcessAlive $pid2)) { $gone = $true; break }
+                        Start-Sleep -Milliseconds 500
+                    }
+                    if (-not $gone) { $allResolved = $false }
+                }
+                default   {
+                    # Unknown：判断不了，既不杀也不能把这条记录丢掉
+                    Write-Host ("    警告：无法确认进程 {0} 的状态，保留锁文件待下轮处理。" -f $pid2) -ForegroundColor DarkYellow
+                    $allResolved = $false
+                }
+            }
         }
 
-        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+        if ($allResolved) {
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
