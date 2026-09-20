@@ -22,6 +22,9 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+# 校验 COM 拿到的是真 Excel 而不是 WPS（WPS 会劫持 Excel 的 COM 注册并自称 Microsoft Excel）
+. (Join-Path $PSScriptRoot "_ExcelHost.ps1")
 $CodeDir  = Join-Path $RepoRoot "src\code"
 
 $files = Get-ChildItem -Path $CodeDir -Recurse -Include *.bas, *.cls, *.frm | Sort-Object FullName
@@ -32,7 +35,7 @@ $preExisting = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object
 
 $xl = $null
 try {
-    $xl = New-Object -ComObject Excel.Application
+    $xl = New-RealExcel
     $xl.Visible = $false
     $xl.DisplayAlerts = $false
     $xl.EnableEvents = $false

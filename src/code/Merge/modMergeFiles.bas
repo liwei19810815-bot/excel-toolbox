@@ -13,6 +13,16 @@ Option Explicit
 Option Private Module
 
 Public Function MergeFolder() As String
+    ' 【安全前置】。这个功能会打开文件夹里每一个 Excel 文件；
+    ' 拿不到 AutomationSecurity 开关就没法禁用对方文件里的宏，
+    ' 扫到一个带自动宏的 .xlsm，它就会在我们的进程里执行。
+    ' 这种情况下宁可不提供功能，也不能默默地在无防护状态下跑。
+    If Not modCaps.SupportsAutomationSecurity() Then
+        MergeFolder = "当前 Excel 宿主不支持禁用外部文件中的宏（AutomationSecurity）。" & vbCrLf & vbCrLf & _
+                      "为避免打开他人文件时执行其中的宏，此功能已停用。"
+        Exit Function
+    End If
+
     Dim folderPath As String
     folderPath = modPrompt.AskFolder("folder", "选择要合并的文件夹")
 

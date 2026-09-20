@@ -35,22 +35,63 @@ Private mRibbon As IRibbonUI
 Public Sub Ribbon_OnLoad(ribbon As IRibbonUI)
     Set mRibbon = ribbon
     StoreRibbonPointer ribbon
+
+    ' 功能区重建 = 加载宏刚装载或 VBA 工程被重置过，上一轮探出来的宿主能力
+    ' 未必还成立，清掉重探
+    On Error Resume Next
+    modCaps.Reset
+    On Error GoTo 0
 End Sub
+
+'==============================================================================
+' 【所有 get* 回调都必须自己兜住异常】。
+'
+' 这些回调由 Excel 在渲染功能区时调用，59 个按钮每次刷新就是 59×3 次调用。
+' 回调里跑出未处理的错误，Excel 不会弹框告诉你——它会把对应控件、
+' 甚至整个组静默画坏。而 VBA 照样编译通过、测试照样全绿。
+'
+' 所以每个回调都给一个安全默认值：宁可按钮多亮着（点下去由 RunAction 的
+' 前置校验拦住并给出清楚提示），也不能让整个选项卡渲染异常。
+'==============================================================================
 
 Public Sub Ribbon_OnAction(control As IRibbonControl)
     modAction.RunAction control.Tag
 End Sub
 
 Public Sub Ribbon_GetEnabled(control As IRibbonControl, ByRef returnedVal)
+    On Error GoTo Fallback
     returnedVal = modAction.IsActionEnabled(control.Tag)
+    Exit Sub
+Fallback:
+    ' 出错就让它可点：RunAction 里还有一层前置校验会拦住并说明原因，
+    ' 比一个说不出理由的灰按钮强
+    returnedVal = True
 End Sub
 
 Public Sub Ribbon_GetLabel(control As IRibbonControl, ByRef returnedVal)
+    On Error GoTo Fallback
     returnedVal = modAction.ActionLabel(control.Tag)
+    Exit Sub
+Fallback:
+    returnedVal = control.Tag
 End Sub
 
 Public Sub Ribbon_GetScreentip(control As IRibbonControl, ByRef returnedVal)
+    On Error GoTo Fallback
     returnedVal = modAction.ActionScreentip(control.Tag)
+    Exit Sub
+Fallback:
+    returnedVal = vbNullString
+End Sub
+
+' 悬停提示的正文。和 GetScreentip 取同一份文字——说明和可撤销性都只在
+' modAction 的注册表里写一次，XML 里不再手抄 supertip，省得两边讲得不一样。
+Public Sub Ribbon_GetSupertip(control As IRibbonControl, ByRef returnedVal)
+    On Error GoTo Fallback
+    returnedVal = modAction.ActionScreentip(control.Tag)
+    Exit Sub
+Fallback:
+    returnedVal = vbNullString
 End Sub
 
 ' 开关型按钮（聚光灯）。pressed 参数是 Ribbon 自己算好的新状态，这里不用它——
@@ -61,7 +102,11 @@ Public Sub Ribbon_OnToggle(control As IRibbonControl, ByVal pressed As Boolean)
 End Sub
 
 Public Sub Ribbon_GetPressed(control As IRibbonControl, ByRef returnedVal)
+    On Error GoTo Fallback
     returnedVal = modAction.IsActionPressed(control.Tag)
+    Exit Sub
+Fallback:
+    returnedVal = False
 End Sub
 
 '==============================================================================

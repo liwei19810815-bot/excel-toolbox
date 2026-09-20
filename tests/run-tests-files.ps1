@@ -24,6 +24,9 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+# 校验 COM 拿到的是真 Excel 而不是 WPS（WPS 会劫持 Excel 的 COM 注册并自称 Microsoft Excel）
+. (Join-Path $RepoRoot "build\_ExcelHost.ps1")
 $Xlam     = Join-Path $RepoRoot "dist\$OutputName"
 
 if (-not (Test-Path $Xlam)) { throw "找不到 $Xlam。请先运行 build\build.ps1。" }
@@ -80,7 +83,7 @@ try {
     Write-Host "沙箱目录：$SandBox" -ForegroundColor DarkGray
 
     Write-Host "==> 启动 Excel 并加载加载宏" -ForegroundColor Cyan
-    $xl = New-Object -ComObject Excel.Application
+    $xl = New-RealExcel
     $xl.Visible = $false
     $xl.DisplayAlerts = $false
 

@@ -11,6 +11,10 @@ Attribute VB_Name = "modFileBatch"
 Option Explicit
 Option Private Module
 
+' 本地编码的 CSV，Excel 各版本都有。UTF-8 那个（62）是 2016 才加进类型库的，
+' 只能用字面量 + 运行时判断，详见 CsvFormat。
+Private Const XL_CSV_LOCAL As Long = 6
+
 '------------------------------------------------------------------------------
 ' 把文件夹内的文件清单导入工作表，同时生成"新文件名"列供填写。
 ' 这张表既是清单，也是批量重命名的输入。
@@ -61,9 +65,18 @@ End Function
 
 Private Sub CollectAll(ByVal fso As Object, ByVal folderObj As Object, _
                        ByVal recursive As Boolean, ByVal result As Collection)
+    ' 递归扫盘没有分母可报，但至少要让用户看见数字在涨——
+    ' 网络盘上扫几万个文件要好几分钟，界面静止不动会被当成死机。
     Dim fileObj As Object
     For Each fileObj In folderObj.Files
-        If Left$(fso.GetFileName(fileObj.Path), 2) <> "~$" Then result.Add fileObj.Path
+        If Left$(fso.GetFileName(fileObj.Path), 2) <> "~$" Then
+            result.Add fileObj.Path
+            ' 递归扫盘没有分母，用不了 SetProgress，只能自己报累计数。
+            ' 节流步长和 SetProgress 一致的量级即可。
+            If result.Count Mod 25 = 0 Then
+                modPerf.SetStatus "正在扫描文件夹…已找到 " & result.Count & " 个文件"
+            End If
+        End If
     Next fileObj
 
     If recursive Then
@@ -157,10 +170,14 @@ Public Function BatchRenameFiles(ByVal ws As Worksheet) As String
     ws.Cells(1, 7).Font.Bold = True
 
     Dim renamed As Long, failed As Long
+    Dim doneCount As Long, totalCount As Long
+    totalCount = plannedTargets.Count
     Dim k As Variant
     For Each k In plannedTargets.Keys
+        doneCount = doneCount + 1
         rowIdx = plannedTargets(k)
         srcPath = Trim$(CStr(ws.Cells(rowIdx, 1).Value))
+        modPerf.SetProgress "重命名", doneCount, totalCount, modIO.FileNameOf(srcPath)
 
         ' 校验和执行之间有时间差，期间别人可能已经建了同名文件。
         ' 这里紧挨着 MoveFile 再查一次，把这个窗口缩到最小——
@@ -201,6 +218,27 @@ Public Function BatchRenameFiles(ByVal ws As Worksheet) As String
                        "注意：文件重命名无法撤销。"
 End Function
 
+'------------------------------------------------------------------------------
+' CSV 的保存格式。
+'
+' 【绝对不能直接写 xlCSVUTF8】。那个常量是 Excel 2016 才加进类型库的，
+' 在 2010/2013 上它根本不存在——而且后果不是"导出 CSV 这个功能不能用"，
+' 是【整个工程编译不过】，工具箱一个命令都加载不了。
+' 一个常量把整个加载宏的版本下限从 2010 顶到了 2016。
+'
+' 所以这里用字面量 62 绕开编译期依赖，再按运行时版本决定用哪个：
+' 2016 及以上用 UTF-8（中文不乱码），更老的版本只能退回本地编码的 CSV。
+'------------------------------------------------------------------------------
+Private Function CsvFormat() As Long
+    Const XL_CSV_UTF8 As Long = 62      ' Excel 2016+
+
+    If Val(Application.Version) >= 16 Then
+        CsvFormat = XL_CSV_UTF8
+    Else
+        CsvFormat = XL_CSV_LOCAL
+    End If
+End Function
+
 Private Function HasInvalidNameChars(ByVal fileName As String) As Boolean
     Dim bad As String, i As Long
     bad = "\/:*?""<>|"
@@ -229,11 +267,16 @@ Public Function ExportSheets(ByVal wb As Workbook) As String
     Dim ws As Worksheet, exported As Long, skipped As Long
     Dim targetPath As String, baseName As String
     Dim tempWb As Workbook
+    Dim doneCount As Long, totalCount As Long
+    Dim sheetFailed As Boolean, failedCount As Long, failedNames As String
+    totalCount = wb.Worksheets.Count
 
     For Each ws In wb.Worksheets
+        doneCount = doneCount + 1
+        sheetFailed = False
         If ws.Visible = xlSheetVisible Then
             baseName = modSheetUtil.SafeSheetName(ws.Name)
-            modPerf.SetStatus "导出 " & baseName
+            modPerf.SetProgress "导出", doneCount, totalCount, baseName
 
             Select Case formatChoice
                 Case 1
@@ -247,23 +290,50 @@ Public Function ExportSheets(ByVal wb As Workbook) As String
                     targetPath = modIO.JoinPath(folderPath, baseName & ".csv")
                     ws.Copy
                     Set tempWb = ActiveWorkbook
-                    tempWb.SaveAs targetPath, xlCSVUTF8      ' UTF-8，避免中文乱码
+                    ' 版本判据只是启发式（宿主可能伪装版本号），所以 UTF-8 存不下去
+                    ' 就退回本地编码的 CSV，而不是让整批导出失败。
+                    ' 【回退也失败就必须算失败】——两次都没存成还计成"已导出"，
+                    ' 用户会拿着一份缺文件的成功报告去交差。
+                    On Error Resume Next
+                    tempWb.SaveAs targetPath, CsvFormat()
+                    If Err.Number <> 0 Then
+                        Err.Clear
+                        tempWb.SaveAs targetPath, XL_CSV_LOCAL
+                        If Err.Number <> 0 Then sheetFailed = True
+                    End If
+                    Err.Clear
                     tempWb.Close SaveChanges:=False
+                    Err.Clear
+                    On Error GoTo 0
 
                 Case 3
                     targetPath = modIO.JoinPath(folderPath, baseName & ".pdf")
                     ws.ExportAsFixedFormat Type:=xlTypePDF, Filename:=targetPath
             End Select
 
-            exported = exported + 1
+            If sheetFailed Then
+                failedNames = failedNames & vbCrLf & "  " & ws.Name
+                failedCount = failedCount + 1
+            Else
+                exported = exported + 1
+            End If
         Else
             skipped = skipped + 1
         End If
     Next ws
 
     modPerf.ClearStatus
-    ExportSheets = "已导出 " & exported & " 张工作表到：" & vbCrLf & folderPath & _
-                   IIf(skipped > 0, vbCrLf & vbCrLf & "跳过 " & skipped & " 张隐藏工作表。", "")
+
+    Dim msg As String
+    msg = "已导出 " & exported & " 张工作表到：" & vbCrLf & folderPath
+    If skipped > 0 Then
+        msg = msg & vbCrLf & vbCrLf & "跳过 " & skipped & " 张隐藏工作表。"
+    End If
+    If failedCount > 0 Then
+        msg = msg & vbCrLf & vbCrLf & "【失败 " & failedCount & " 张，文件未生成】：" & failedNames
+    End If
+
+    ExportSheets = msg
 End Function
 
 '------------------------------------------------------------------------------
@@ -296,10 +366,14 @@ Public Function InsertImages(ByVal target As Range) As String
     Dim inserted As Long, missing As Long
     Dim targetCell As Range, pic As Object
     Dim i As Long, candidate As String
+    Dim doneCount As Long, totalCount As Long
+    totalCount = srcRng.Cells.Count
 
     For Each cellRng In srcRng.Cells
+        doneCount = doneCount + 1
         nameText = Trim$(CStr(cellRng.Value))
         If Len(nameText) > 0 Then
+            modPerf.SetProgress "插图", doneCount, totalCount, nameText
             found = ""
             For i = LBound(exts) To UBound(exts)
                 candidate = modIO.JoinPath(folderPath, nameText & "." & exts(i))
@@ -314,12 +388,13 @@ Public Function InsertImages(ByVal target As Range) As String
             Else
                 Set targetCell = ws.Cells(cellRng.Row, cellRng.Column + 1)
                 Set pic = ws.Shapes.AddPicture(Filename:=found, _
-                            LinkToFile:=msoFalse, SaveWithDocument:=msoTrue, _
+                            LinkToFile:=modIO.MSO_FALSE, _
+                            SaveWithDocument:=modIO.MSO_TRUE, _
                             Left:=targetCell.Left + 1, Top:=targetCell.Top + 1, _
                             Width:=-1, Height:=-1)
 
                 ' 等比缩放到刚好放进单元格
-                pic.LockAspectRatio = msoTrue
+                pic.LockAspectRatio = modIO.MSO_TRUE
                 If pic.Height > targetCell.Height - 2 Then
                     pic.Height = targetCell.Height - 2
                 End If

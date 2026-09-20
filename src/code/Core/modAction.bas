@@ -61,7 +61,8 @@ Private Sub RegisterAll()
     RegisterAction "core.about", "关于", "", _
                    Undoable:=False, RequiresWorkbook:=False
     RegisterAction "core.resetEnv", "环境复位", _
-                   "宏异常中断后用它恢复屏幕刷新、自动重算和事件响应", _
+                   "恢复屏幕刷新、自动重算、事件响应和状态栏。" & _
+                   "宏被强行中断后如果 Excel 变得没有反应或不自动计算，点这里", _
                    Undoable:=False, RequiresWorkbook:=False
 
     ' --- M1 文本与单元格 ---
@@ -69,7 +70,8 @@ Private Sub RegisterAll()
                    "去掉首尾空格、压缩中间连续空格，并清除不间断空格、全角空格、零宽字符等不可见字符", _
                    RequiresSelection:=True
     RegisterAction "text.toNumber", "文本转数值", _
-                   "把文本型数字转成真正的数值，自动处理全角数字、千分位逗号和不间断空格", _
+                   "把文本型数字转成真正的数值，自动处理全角数字、千分位逗号和不间断空格。" & _
+                   "这是求和结果为 0 的头号原因", _
                    RequiresSelection:=True
     RegisterAction "text.toUpper", "转大写", "", RequiresSelection:=True
     RegisterAction "text.toLower", "转小写", "", RequiresSelection:=True
@@ -83,12 +85,12 @@ Private Sub RegisterAll()
     RegisterAction "text.extractChinese", "提取中文", "", RequiresSelection:=True
     RegisterAction "text.extractEnglish", "提取字母", "", RequiresSelection:=True
     RegisterAction "text.addAffix", "添加前后缀", _
-                   "批量给选区加前缀或后缀", RequiresSelection:=True
+                   "批量给选区加前缀或后缀", RequiresSelection:=True, PromptsForInput:=True
     RegisterAction "text.regexReplace", "正则替换", _
-                   "用正则表达式批量查找替换", RequiresSelection:=True
+                   "用正则表达式批量查找替换", RequiresSelection:=True, PromptsForInput:=True
     RegisterAction "text.splitColumn", "按分隔符拆列", _
                    "把一列按分隔符拆成多列，自动插入所需列数，不覆盖右侧数据", _
-                   RequiresSelection:=True
+                   RequiresSelection:=True, PromptsForInput:=True
     RegisterAction "cells.unmergeFill", "拆分并填充", _
                    "取消合并单元格，并把原值填满整个区域", RequiresSelection:=True
     RegisterAction "cells.mergeSame", "合并相同项", _
@@ -96,56 +98,72 @@ Private Sub RegisterAll()
 
     ' --- M2 数据处理 ---
     RegisterAction "data.deleteEmptyRows", "删除空行", _
-                   "删除选区内完全为空的整行", RequiresSelection:=True
+                   "删除选区内完全为空的整行。只按选中的列判断是否为空", RequiresSelection:=True
     RegisterAction "data.deleteEmptyCols", "删除空列", _
                    "删除选区内完全为空的整列", RequiresSelection:=True
     RegisterAction "data.markDuplicates", "标记重复值", _
-                   "把重复行标成浅红色，支持多列组合判重", RequiresSelection:=True
+                   "把重复行标成浅红色，支持多列组合判重", _
+                   RequiresSelection:=True, PromptsForInput:=True
     RegisterAction "data.deleteDuplicates", "删除重复值", _
-                   "删除重复行并保留首次出现，支持多列组合判重", RequiresSelection:=True
+                   "删除重复行并保留首次出现，支持多列组合判重", _
+                   RequiresSelection:=True, PromptsForInput:=True
     RegisterAction "data.extractUnique", "提取唯一值", _
                    "把选区内的唯一值提取到新工作表", RequiresSelection:=True
     RegisterAction "data.compare", "两表对比", _
-                   "按键列对比两个区域，输出差异报告并可跳转定位", _
-                   Undoable:=False, RequiresWorkbook:=True
+                   "按键列对比两个区域，输出差异报告：仅 A 有 / 仅 B 有 / 内容不同，" & _
+                   "每行都能点击跳回源数据", _
+                   Undoable:=False, RequiresWorkbook:=True, PromptsForInput:=True
     RegisterAction "data.unpivot", "二维转一维", _
-                   "逆透视：把交叉表展开成明细表", RequiresSelection:=True, Undoable:=False
+                   "逆透视：把交叉表展开成明细表。透视表、Power Query 和数据库都需要一维明细表", _
+                   RequiresSelection:=True, Undoable:=False, PromptsForInput:=True
     RegisterAction "data.transpose", "行列转置", _
                    "把选区转置后输出到新工作表", RequiresSelection:=True, Undoable:=False
 
     ' --- M3 工作表管理 ---
+    ' 拆表/排序/重命名都会改动工作簿结构且撤不回来，一律强制确认。
+    ' 「按列拆分」一次可能生成上百张表，手工删回去比出错本身还痛苦。
     RegisterAction "sheet.splitByColumn", "按列拆分工作表", _
                    "按某列的值把数据拆分成多个工作表", _
-                   RequiresSelection:=True, Undoable:=False
+                   RequiresSelection:=True, Undoable:=False, _
+                   ConfirmBeforeRun:=True, PromptsForInput:=True
     RegisterAction "sheet.mergeAll", "合并所有工作表", _
-                   "把当前工作簿所有工作表按标题名对齐合并到一张汇总表", Undoable:=False
+                   "把当前工作簿所有工作表合并到一张汇总表。" & _
+                   "按标题名对齐，而不是按列位置——某张表少一列也不会整体错位", Undoable:=False
     RegisterAction "sheet.createIndex", "生成目录", _
                    "生成带超链接的工作表目录", Undoable:=False
-    RegisterAction "sheet.sort", "工作表排序", "按名称排列工作表", Undoable:=False
+    RegisterAction "sheet.sort", "工作表排序", "按名称排列工作表", _
+                   Undoable:=False, ConfirmBeforeRun:=True, PromptsForInput:=True
+    ' 深度隐藏的表往往是作者有意藏起来的（参数表、中间计算表），
+    ' 一次全部放出来之后没有记录能还原回去——所以也要确认
     RegisterAction "sheet.showAll", "显示所有表", _
-                   "显示全部隐藏工作表（含深度隐藏）", Undoable:=False
+                   "显示全部隐藏工作表（含深度隐藏）。" & _
+                   "哪些表原来是隐藏的不会被记录下来，之后无法一键还原", _
+                   Undoable:=False, ConfirmBeforeRun:=True
     RegisterAction "sheet.batchRename", "批量重命名表", _
                    "按选中的名称列表批量重命名工作表", _
-                   RequiresSelection:=True, Undoable:=False
+                   RequiresSelection:=True, Undoable:=False, ConfirmBeforeRun:=True
 
     ' --- M4 多文件合并 ---
     RegisterAction "merge.folder", "合并文件夹", _
-                   "合并一个文件夹内所有 Excel 文件的数据，结果带来源文件和来源工作表列", _
-                   Undoable:=False, RequiresWorkbook:=False
+                   "合并一个文件夹内所有 Excel 文件的数据，结果带来源文件和来源工作表列。" & _
+                   "单个文件失败不会中断整批，最后出失败清单", _
+                   Undoable:=False, RequiresWorkbook:=False, PromptsForInput:=True
 
     ' --- M5 文件批处理（全部不可撤销，强制确认）---
     RegisterAction "file.list", "文件清单", _
                    "把文件夹内的文件清单导入工作表，并生成可填写的新文件名列", _
-                   Undoable:=False, RequiresWorkbook:=True
+                   Undoable:=False, RequiresWorkbook:=True, PromptsForInput:=True
     RegisterAction "file.batchRename", "批量重命名", _
                    "按当前「文件清单」表的 F 列批量重命名文件。先全表校验，全部通过才动手", _
                    Undoable:=False, ConfirmBeforeRun:=True
     RegisterAction "file.exportSheets", "导出工作表", _
                    "把每张工作表导出为独立的 xlsx / CSV / PDF 文件", _
-                   Undoable:=False, ConfirmBeforeRun:=True
+                   Undoable:=False, ConfirmBeforeRun:=True, PromptsForInput:=True
+    ' 插进去的图片是浮动对象，撤不回来，手工一张张删很痛苦——必须确认
     RegisterAction "file.insertImages", "批量插图", _
                    "按单元格内容在指定文件夹里找同名图片并插入到右侧单元格", _
-                   Undoable:=False, RequiresSelection:=True
+                   Undoable:=False, RequiresSelection:=True, _
+                   ConfirmBeforeRun:=True, PromptsForInput:=True
 
     ' --- M6 公式与引用 ---
     RegisterAction "formula.toValues", "公式转值", _
@@ -153,7 +171,8 @@ Private Sub RegisterAll()
     RegisterAction "formula.findErrors", "定位错误值", _
                    "找出并标黄选区内的所有错误值", RequiresSelection:=True
     RegisterAction "formula.wrapIfError", "套用 IFERROR", _
-                   "给选区内的公式批量加上 IFERROR 容错", RequiresSelection:=True
+                   "给选区内的公式批量加上 IFERROR 容错", _
+                   RequiresSelection:=True, PromptsForInput:=True
     RegisterAction "formula.breakLinks", "断开外部链接", _
                    "把所有外部链接公式转为当前值", _
                    Undoable:=False, ConfirmBeforeRun:=True
@@ -169,7 +188,8 @@ Private Sub RegisterAll()
                    "扫描当前工作表，列出空行、文本型数字、文本型日期、错误值、合并单元格等问题，可点击跳转", _
                    Undoable:=False
     RegisterAction "audit.quickClean", "一键清洗", _
-                   "清理空白字符、文本型数字转数值、删除空行", RequiresSelection:=True
+                   "修掉最常见且无歧义的几类问题：清理空白字符、文本型数字转数值、删除空行。" & _
+                   "合并单元格和错误值需要人工判断，不会自动改", RequiresSelection:=True
 
     ' --- M8 数据可视化 ---
     RegisterAction "viz.dataBars", "数据条", "给数值单元格添加数据条", RequiresSelection:=True
@@ -177,11 +197,15 @@ Private Sub RegisterAll()
     RegisterAction "viz.iconSet", "图标集", "三色交通灯图标集", RequiresSelection:=True
     RegisterAction "viz.clearCF", "清除条件格式", "清除选区内所有条件格式", RequiresSelection:=True
     RegisterAction "viz.sparklines", "批量迷你图", _
-                   "每行生成一个迷你图，放在数据右侧一列", RequiresSelection:=True
+                   "每行生成一个迷你图，放在数据右侧一列", _
+                   RequiresSelection:=True, PromptsForInput:=True
     RegisterAction "viz.quickChart", "快速图表", _
-                   "按选区生成图表并套用统一格式", RequiresSelection:=True, Undoable:=False
+                   "按选区生成图表并套用统一格式", _
+                   RequiresSelection:=True, Undoable:=False, PromptsForInput:=True
+    ' 会覆盖用户手工调好的图表格式，且撤不回来
     RegisterAction "viz.unifyCharts", "统一图表格式", _
-                   "把当前工作表所有图表的格式统一", Undoable:=False
+                   "把当前工作表所有图表的格式统一，会覆盖你手工调过的格式", _
+                   Undoable:=False, ConfirmBeforeRun:=True
 
     ' --- M9 辅助增强 ---
     RegisterAction "misc.spotlight", "聚光灯", _
@@ -203,7 +227,8 @@ Public Sub RegisterAction(ByVal id As String, _
                           Optional ByVal ConfirmBeforeRun As Boolean = False, _
                           Optional ByVal RequiresSelection As Boolean = False, _
                           Optional ByVal RequiresWorkbook As Boolean = True, _
-                          Optional ByVal SupportedInWps As Boolean = True)
+                          Optional ByVal SupportedInWps As Boolean = True, _
+                          Optional ByVal PromptsForInput As Boolean = False)
     Dim d As clsActionDef
     Set d = New clsActionDef
     d.Id = id
@@ -214,6 +239,7 @@ Public Sub RegisterAction(ByVal id As String, _
     d.RequiresSelection = RequiresSelection
     d.RequiresWorkbook = RequiresWorkbook
     d.SupportedInWps = SupportedInWps
+    d.PromptsForInput = PromptsForInput
     Set mActions(id) = d
 End Sub
 
@@ -254,15 +280,42 @@ Public Function ActionLabel(ByVal actionId As String) As String
         Dim lbl As String
         lbl = modUndo.PeekLabel()
         If Len(lbl) > 0 Then ActionLabel = "撤销 " & lbl Else ActionLabel = d.Label
-    Else
-        ActionLabel = d.Label
+        Exit Function
     End If
+
+    ActionLabel = d.Label
+    ' "…" 由 PromptsForInput 统一生成，不在 XML 里手写，两边不会再对不上
+    If d.PromptsForInput Then ActionLabel = ActionLabel & "…"
 End Function
 
+'------------------------------------------------------------------------------
+' 悬停提示。
+'
+' 在注册时写的说明后面【自动追加一行可撤销性】。
+' 这件事必须自动做：手写的话一定会漏——改之前 59 条里只有零星几条
+' 在 supertip 末尾写了"可撤销。"，用户站在按钮前没有统一线索判断有没有退路。
+'------------------------------------------------------------------------------
 Public Function ActionScreentip(ByVal actionId As String) As String
     Dim d As clsActionDef
     Set d = GetAction(actionId)
-    If Not d Is Nothing Then ActionScreentip = d.Screentip
+    If d Is Nothing Then Exit Function
+
+    Dim buf As String
+    buf = d.Screentip
+
+    Select Case actionId
+        Case "core.undoLast", "core.selfTest", "core.about", "core.resetEnv"
+            ' 这几个本身就是元操作，标注可撤销性只会让人困惑
+        Case Else
+            If Len(buf) > 0 Then buf = buf & vbCrLf
+            If d.Undoable Then
+                buf = buf & "【可撤销】执行后可用工具箱的撤销按钮还原。"
+            Else
+                buf = buf & "【不可撤销】工具箱的撤销按钮还原不了，建议先保存。"
+            End If
+    End Select
+
+    ActionScreentip = buf
 End Function
 
 ' 开关型按钮的按下状态
@@ -273,7 +326,17 @@ Public Function IsActionPressed(ByVal actionId As String) As Boolean
     End Select
 End Function
 
+'------------------------------------------------------------------------------
+' 按钮是否可点。由 Ribbon 的 getEnabled 回调调用——59 个按钮，每次功能区刷新
+' 就跑 59 次，所以这里既要快，也【不许抛错】：回调里的未处理异常会让 Excel
+' 静默画坏控件，而不会给任何提示。
+'
+' 出错时一律返回 True（可点）：点下去还有 RunAction 的前置校验会拦住并说明原因，
+' 比一个说不出理由的灰按钮强。
+'------------------------------------------------------------------------------
 Public Function IsActionEnabled(ByVal actionId As String) As Boolean
+    On Error GoTo Fallback
+
     Dim d As clsActionDef
     Set d = GetAction(actionId)
     If d Is Nothing Then Exit Function
@@ -281,12 +344,26 @@ Public Function IsActionEnabled(ByVal actionId As String) As Boolean
     If modApp.IsWps And Not d.SupportedInWps Then Exit Function
     If d.RequiresWorkbook And ActiveWorkbook Is Nothing Then Exit Function
 
+    ' 宿主能力探测：不支持的命令直接灰显，而不是让用户点了才看到报错。
+    ' 这比在 clsActionDef 上人工维护一张"哪个宿主支持哪个 API"的表可靠——
+    ' 那张表在开发机上根本没法验证，事实上也一直是空的。
     Select Case actionId
         Case "core.undoLast"
             IsActionEnabled = modUndo.CanUndo()
+
+        Case "viz.sparklines"
+            IsActionEnabled = modCaps.SupportsSparklines()
+
+        Case "merge.folder", "file.list", "file.exportSheets", "file.insertImages"
+            IsActionEnabled = modCaps.SupportsFileDialog()
+
         Case Else
             IsActionEnabled = True
     End Select
+    Exit Function
+
+Fallback:
+    IsActionEnabled = True
 End Function
 
 '==============================================================================

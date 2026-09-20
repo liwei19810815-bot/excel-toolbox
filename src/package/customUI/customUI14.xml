@@ -5,7 +5,16 @@
   约定：
     - 所有按钮统一 onAction="Ribbon_OnAction"，用 tag 携带 actionId。
       新增工具只需在这里加一个按钮 + 在 modAction 注册和转派，不用新增回调函数。
-    - 高频命令直接上按钮，长尾命令收进 menu 下拉，避免一个选项卡塞几十个图标。
+    - 【按钮上不写 label / screentip / supertip / enabled 的字面量】。
+      这四项全部走 getXxx 回调，从 modAction 的注册表取。
+      原先两边各写一份，结果按钮叫"删除重复"、撤销按钮却显示"撤销 删除重复值"；
+      "点了还会追问参数"的省略号也漏在了问得最多的几个大按钮上。
+      现在标签、省略号、可撤销标注都由注册表一处生成。
+    - getEnabled 必须挂在每一个按钮上。modAction.IsActionEnabled 会问 modCaps
+      当前宿主支不支持；不挂的话那套灰显机制等于没写——按钮照样亮着，点了才报错。
+    - 高频命令直接上大按钮，长尾命令收进 menu 下拉。
+      【下拉菜单要按内容起名】，不能四个组各放一个叫"更多"、图标还一样的抽屉——
+      用户建立不起"某个功能在哪儿"的记忆，只能一个个点开找。
     - imageMso 用的是 Office 内置图标 ID，这样不必往包里塞图片资源。
 -->
 <customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="Ribbon_OnLoad">
@@ -15,166 +24,254 @@
 
         <!-- ===================== 撤销 ===================== -->
         <group id="grpUndo" label="撤销">
-          <button id="btnUndoLast" getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
-                  getScreentip="Ribbon_GetScreentip"
-                  tag="core.undoLast" onAction="Ribbon_OnAction"
+          <button id="btnUndoLast" tag="core.undoLast" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getScreentip="Ribbon_GetScreentip" getSupertip="Ribbon_GetSupertip"
                   imageMso="Undo" size="large"/>
-          <button id="btnResetEnv" label="环境复位" tag="core.resetEnv" onAction="Ribbon_OnAction"
-                  imageMso="RefreshStatus"
-                  screentip="宏异常中断后恢复 Excel 环境"
-                  supertip="恢复屏幕刷新、自动重算、事件响应和状态栏。宏被强行中断后如果 Excel 变得没有反应或不自动计算，点这里。"/>
+          <button id="btnResetEnv" tag="core.resetEnv" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="RefreshStatus"/>
         </group>
 
         <!-- ===================== 文本处理 ===================== -->
         <group id="grpText" label="文本处理">
-          <button id="btnCleanSpaces" label="清除空格" tag="text.cleanSpaces"
-                  onAction="Ribbon_OnAction" imageMso="TextBoxInsert" size="large"
-                  screentip="清除空格与不可见字符"
-                  supertip="去掉首尾空格、压缩中间连续空格，并清除不间断空格、全角空格、零宽字符等看不见但会导致匹配失败的字符。"/>
-          <button id="btnToNumber" label="文本转数值" tag="text.toNumber"
-                  onAction="Ribbon_OnAction" imageMso="NumberFormatGeneral" size="large"
-                  screentip="文本型数字转为真正的数值"
-                  supertip="自动处理全角数字、千分位逗号和不间断空格。这是求和结果为 0 的头号原因。"/>
-          <menu id="mnuCase" label="大小写" imageMso="FontDialog" size="large">
-            <button id="btnUpper" label="转大写" tag="text.toUpper" onAction="Ribbon_OnAction"/>
-            <button id="btnLower" label="转小写" tag="text.toLower" onAction="Ribbon_OnAction"/>
-            <button id="btnProper" label="首字母大写" tag="text.toProper" onAction="Ribbon_OnAction"/>
+          <button id="btnCleanSpaces" tag="text.cleanSpaces" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="TextBoxInsert" size="large"/>
+          <button id="btnToNumber" tag="text.toNumber" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="NumberFormatGeneral" size="large"/>
+          <menu id="mnuCase" label="大小写与全半角" imageMso="FontDialog" size="large">
+            <button id="btnUpper" tag="text.toUpper" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnLower" tag="text.toLower" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnProper" tag="text.toProper" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
             <menuSeparator id="sepCase"/>
-            <button id="btnHalf" label="全角转半角" tag="text.toHalfWidth" onAction="Ribbon_OnAction"/>
-            <button id="btnFull" label="半角转全角" tag="text.toFullWidth" onAction="Ribbon_OnAction"/>
+            <button id="btnHalf" tag="text.toHalfWidth" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnFull" tag="text.toFullWidth" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
           </menu>
-          <menu id="mnuExtract" label="提取内容" imageMso="Copy" size="large">
-            <button id="btnDigits" label="只保留数字" tag="text.extractDigits" onAction="Ribbon_OnAction"/>
-            <button id="btnChinese" label="只保留中文" tag="text.extractChinese" onAction="Ribbon_OnAction"/>
-            <button id="btnEnglish" label="只保留字母" tag="text.extractEnglish" onAction="Ribbon_OnAction"/>
+          <menu id="mnuExtract" label="提取内容" imageMso="FilterBySelection" size="large">
+            <button id="btnDigits" tag="text.extractDigits" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnChinese" tag="text.extractChinese" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnEnglish" tag="text.extractEnglish" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
           </menu>
-          <menu id="mnuTextMore" label="更多" imageMso="MoreControlsDialog" size="large">
-            <button id="btnAffix" label="添加前后缀…" tag="text.addAffix" onAction="Ribbon_OnAction"/>
-            <button id="btnRegex" label="正则替换…" tag="text.regexReplace" onAction="Ribbon_OnAction"/>
-            <button id="btnSplitCol" label="按分隔符拆列…" tag="text.splitColumn" onAction="Ribbon_OnAction"/>
-            <button id="btnNoBreaks" label="删除换行符" tag="text.removeLineBreaks" onAction="Ribbon_OnAction"/>
+          <menu id="mnuTextMore" label="拆分与合并" imageMso="TableCellsSplit" size="large">
+            <button id="btnAffix" tag="text.addAffix" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnRegex" tag="text.regexReplace" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnSplitCol" tag="text.splitColumn" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnNoBreaks" tag="text.removeLineBreaks" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
             <menuSeparator id="sepMerge"/>
-            <button id="btnUnmerge" label="拆分合并单元格并填充" tag="cells.unmergeFill" onAction="Ribbon_OnAction"/>
-            <button id="btnMergeSame" label="合并相同项" tag="cells.mergeSame" onAction="Ribbon_OnAction"/>
+            <button id="btnUnmerge" tag="cells.unmergeFill" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnMergeSame" tag="cells.mergeSame" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
           </menu>
         </group>
 
         <!-- ===================== 数据处理 ===================== -->
         <group id="grpData" label="数据处理">
-          <button id="btnDelEmptyRows" label="删除空行" tag="data.deleteEmptyRows"
-                  onAction="Ribbon_OnAction" imageMso="TableRowsDeleteExcel" size="large"
-                  screentip="删除选区内完全为空的整行"
-                  supertip="只按选中的列判断是否为空。可撤销。"/>
-          <button id="btnDedupe" label="删除重复" tag="data.deleteDuplicates"
-                  onAction="Ribbon_OnAction" imageMso="RemoveDuplicates" size="large"
-                  screentip="删除重复行，保留首次出现"
-                  supertip="支持多列组合判重。可撤销。"/>
-          <button id="btnCompare" label="两表对比" tag="data.compare"
-                  onAction="Ribbon_OnAction" imageMso="ViewSideBySide" size="large"
-                  screentip="按键列对比两个区域"
-                  supertip="输出差异报告：仅 A 有 / 仅 B 有 / 内容不同，每行都能点击跳回源数据。"/>
-          <button id="btnUnpivot" label="二维转一维" tag="data.unpivot"
-                  onAction="Ribbon_OnAction" imageMso="PivotTableLayoutTabularForm" size="large"
-                  screentip="逆透视：把交叉表展开成明细表"
-                  supertip="透视表、Power Query 和数据库都需要一维明细表。"/>
-          <menu id="mnuDataMore" label="更多" imageMso="MoreControlsDialog" size="large">
-            <button id="btnDelEmptyCols" label="删除空列" tag="data.deleteEmptyCols" onAction="Ribbon_OnAction"/>
-            <button id="btnMarkDup" label="标记重复值…" tag="data.markDuplicates" onAction="Ribbon_OnAction"/>
-            <button id="btnUnique" label="提取唯一值" tag="data.extractUnique" onAction="Ribbon_OnAction"/>
-            <button id="btnTranspose" label="行列转置" tag="data.transpose" onAction="Ribbon_OnAction"/>
+          <button id="btnDelEmptyRows" tag="data.deleteEmptyRows" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="TableRowsDeleteExcel" size="large"/>
+          <button id="btnDedupe" tag="data.deleteDuplicates" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="RemoveDuplicates" size="large"/>
+          <button id="btnCompare" tag="data.compare" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="ViewSideBySide" size="large"/>
+          <button id="btnUnpivot" tag="data.unpivot" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="PivotTableLayoutTabularForm" size="large"/>
+          <menu id="mnuDataMore" label="去重与转置" imageMso="PivotTableLayoutCompactForm" size="large">
+            <button id="btnDelEmptyCols" tag="data.deleteEmptyCols" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnMarkDup" tag="data.markDuplicates" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnUnique" tag="data.extractUnique" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnTranspose" tag="data.transpose" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
           </menu>
         </group>
 
         <!-- ===================== 工作表与文件 ===================== -->
         <group id="grpSheet" label="工作表与文件">
-          <button id="btnMergeFolder" label="合并文件夹" tag="merge.folder"
-                  onAction="Ribbon_OnAction" imageMso="FileOpenDatabase" size="large"
-                  screentip="合并一个文件夹内所有 Excel 文件"
-                  supertip="结果带来源文件和来源工作表列。单个文件失败不会中断整批，最后出失败清单。"/>
-          <button id="btnMergeSheets" label="合并所有表" tag="sheet.mergeAll"
-                  onAction="Ribbon_OnAction" imageMso="TableMerge" size="large"
-                  screentip="合并当前工作簿所有工作表"
-                  supertip="按标题名对齐，而不是按列位置——某张表少一列也不会整体错位。"/>
-          <button id="btnSplitSheet" label="按列拆表" tag="sheet.splitByColumn"
-                  onAction="Ribbon_OnAction" imageMso="TableSplitCells" size="large"
-                  screentip="按某列的值拆分成多个工作表"/>
+          <button id="btnMergeFolder" tag="merge.folder" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="FileOpenDatabase" size="large"/>
+          <button id="btnMergeSheets" tag="sheet.mergeAll" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="TableMerge" size="large"/>
+          <button id="btnSplitSheet" tag="sheet.splitByColumn" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="TableSplitCells" size="large"/>
           <menu id="mnuSheetMore" label="工作表" imageMso="SheetInsert" size="large">
-            <button id="btnIndex" label="生成目录" tag="sheet.createIndex" onAction="Ribbon_OnAction"/>
-            <button id="btnSortSheets" label="工作表排序…" tag="sheet.sort" onAction="Ribbon_OnAction"/>
-            <button id="btnShowAll" label="显示所有隐藏表" tag="sheet.showAll" onAction="Ribbon_OnAction"/>
-            <button id="btnRenameSheets" label="按列表批量重命名" tag="sheet.batchRename" onAction="Ribbon_OnAction"/>
+            <button id="btnIndex" tag="sheet.createIndex" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnSortSheets" tag="sheet.sort" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnShowAll" tag="sheet.showAll" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnRenameSheets" tag="sheet.batchRename" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
           </menu>
           <menu id="mnuFile" label="文件批处理" imageMso="FileSaveAsExcelXlsx" size="large">
-            <button id="btnFileList" label="生成文件清单" tag="file.list" onAction="Ribbon_OnAction"/>
-            <button id="btnFileRename" label="批量重命名文件…" tag="file.batchRename" onAction="Ribbon_OnAction"/>
-            <button id="btnExportSheets" label="导出工作表为文件…" tag="file.exportSheets" onAction="Ribbon_OnAction"/>
-            <button id="btnInsertImages" label="批量插入图片…" tag="file.insertImages" onAction="Ribbon_OnAction"/>
+            <button id="btnFileList" tag="file.list" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnFileRename" tag="file.batchRename" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnExportSheets" tag="file.exportSheets" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnInsertImages" tag="file.insertImages" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
           </menu>
         </group>
 
         <!-- ===================== 公式与体检 ===================== -->
         <group id="grpFormula" label="公式与体检">
-          <button id="btnAudit" label="数据体检" tag="audit.scan"
-                  onAction="Ribbon_OnAction" imageMso="CheckSpelling" size="large"
-                  screentip="一次扫出全部数据质量问题"
-                  supertip="空行、文本型数字、文本型日期、错误值、合并单元格、首尾空格、超长文本。报告每行都能点击跳转定位。"/>
-          <button id="btnQuickClean" label="一键清洗" tag="audit.quickClean"
-                  onAction="Ribbon_OnAction" imageMso="Repair" size="large"
-                  screentip="修掉最常见且无歧义的几类问题"
-                  supertip="清理空白字符、文本型数字转数值、删除空行。合并单元格和错误值需要人工判断，不会自动改。可撤销。"/>
-          <button id="btnToValues" label="公式转值" tag="formula.toValues"
-                  onAction="Ribbon_OnAction" imageMso="PasteValues" size="large"
-                  screentip="把选区内的公式替换为计算结果"/>
+          <button id="btnAudit" tag="audit.scan" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="CheckSpelling" size="large"/>
+          <button id="btnQuickClean" tag="audit.quickClean" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="Repair" size="large"/>
+          <button id="btnToValues" tag="formula.toValues" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="PasteValues" size="large"/>
           <menu id="mnuFormulaMore" label="公式工具" imageMso="FunctionsInsertGallery" size="large">
-            <button id="btnFindErrors" label="定位错误值" tag="formula.findErrors" onAction="Ribbon_OnAction"/>
-            <button id="btnWrapIfError" label="套用 IFERROR…" tag="formula.wrapIfError" onAction="Ribbon_OnAction"/>
-            <button id="btnToggleFormula" label="显示/隐藏公式" tag="formula.toggleView" onAction="Ribbon_OnAction"/>
+            <button id="btnFindErrors" tag="formula.findErrors" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnWrapIfError" tag="formula.wrapIfError" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnToggleFormula" tag="formula.toggleView" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
             <menuSeparator id="sepFormula"/>
-            <button id="btnBreakLinks" label="断开外部链接…" tag="formula.breakLinks" onAction="Ribbon_OnAction"/>
-            <button id="btnCleanNames" label="清理失效名称…" tag="formula.cleanNames" onAction="Ribbon_OnAction"/>
-            <button id="btnCleanRules" label="清理格式规则" tag="formula.cleanRules" onAction="Ribbon_OnAction"/>
+            <button id="btnBreakLinks" tag="formula.breakLinks" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnCleanNames" tag="formula.cleanNames" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnCleanRules" tag="formula.cleanRules" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
           </menu>
         </group>
 
         <!-- ===================== 可视化 ===================== -->
         <group id="grpViz" label="可视化">
-          <button id="btnDataBars" label="数据条" tag="viz.dataBars"
-                  onAction="Ribbon_OnAction" imageMso="ConditionalFormattingDataBars" size="large"/>
-          <button id="btnColorScale" label="色阶" tag="viz.colorScale"
-                  onAction="Ribbon_OnAction" imageMso="ConditionalFormattingColorScales" size="large"/>
-          <button id="btnQuickChart" label="快速图表" tag="viz.quickChart"
-                  onAction="Ribbon_OnAction" imageMso="ChartInsert" size="large"
-                  screentip="按选区生成图表并套用统一格式"/>
-          <menu id="mnuVizMore" label="更多" imageMso="MoreControlsDialog" size="large">
-            <button id="btnIconSet" label="图标集" tag="viz.iconSet" onAction="Ribbon_OnAction"/>
-            <button id="btnSparklines" label="批量迷你图…" tag="viz.sparklines" onAction="Ribbon_OnAction"/>
-            <button id="btnUnifyCharts" label="统一图表格式" tag="viz.unifyCharts" onAction="Ribbon_OnAction"/>
+          <button id="btnDataBars" tag="viz.dataBars" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="ConditionalFormattingDataBars" size="large"/>
+          <button id="btnColorScale" tag="viz.colorScale" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="ConditionalFormattingColorScales" size="large"/>
+          <button id="btnQuickChart" tag="viz.quickChart" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="ChartInsert" size="large"/>
+          <menu id="mnuVizMore" label="条件格式与图表" imageMso="ConditionalFormattingMenu" size="large">
+            <button id="btnIconSet" tag="viz.iconSet" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnSparklines" tag="viz.sparklines" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnUnifyCharts" tag="viz.unifyCharts" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
             <menuSeparator id="sepViz"/>
-            <button id="btnClearCF" label="清除条件格式" tag="viz.clearCF" onAction="Ribbon_OnAction"/>
+            <button id="btnClearCF" tag="viz.clearCF" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
           </menu>
         </group>
 
         <!-- ===================== 辅助 ===================== -->
         <group id="grpMisc" label="辅助">
-          <toggleButton id="btnSpotlight" label="聚光灯" tag="misc.spotlight"
+          <toggleButton id="btnSpotlight" tag="misc.spotlight"
                         onAction="Ribbon_OnToggle" getPressed="Ribbon_GetPressed"
-                        imageMso="LightingGallery" size="large"
-                        screentip="高亮光标所在的整行整列"
-                        supertip="用条件格式实现，不会破坏你原有的单元格底色。"/>
-          <button id="btnAmount" label="金额大写" tag="misc.amountToChinese"
-                  onAction="Ribbon_OnAction" imageMso="CurrencyOther" size="large"
-                  screentip="把一列金额转成人民币中文大写"/>
-          <menu id="mnuMiscMore" label="更多" imageMso="MoreControlsDialog" size="large">
-            <button id="btnParseId" label="身份证解析" tag="misc.parseId" onAction="Ribbon_OnAction"/>
-            <button id="btnNormalizeDates" label="日期规范化" tag="misc.normalizeDates" onAction="Ribbon_OnAction"/>
+                        getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                        getSupertip="Ribbon_GetSupertip"
+                        imageMso="LightingGallery" size="large"/>
+          <button id="btnAmount" tag="misc.amountToChinese" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="CurrencyOther" size="large"/>
+          <menu id="mnuMiscMore" label="身份证与日期" imageMso="DateAndTimeInsert" size="large">
+            <button id="btnParseId" tag="misc.parseId" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
+            <button id="btnNormalizeDates" tag="misc.normalizeDates" onAction="Ribbon_OnAction"
+                    getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                    getSupertip="Ribbon_GetSupertip"/>
           </menu>
         </group>
 
         <!-- ===================== 关于 ===================== -->
         <group id="grpAbout" label="关于">
-          <button id="btnSelfTest" label="自检" tag="core.selfTest" onAction="Ribbon_OnAction"
+          <button id="btnSelfTest" tag="core.selfTest" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
                   imageMso="AcceptInvitation"/>
-          <button id="btnAbout" label="关于" tag="core.about" onAction="Ribbon_OnAction"
+          <button id="btnAbout" tag="core.about" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
                   imageMso="Info"/>
         </group>
 

@@ -102,6 +102,29 @@ Public Sub SetStatus(ByVal text As String)
     On Error GoTo 0
 End Sub
 
+'------------------------------------------------------------------------------
+' 带计数的进度提示：「批量插图 37/200：产品A.jpg」。
+'
+' 长任务只写一句"执行中…"，用户看不出是在干活还是卡死了，几分钟后就会去点
+' 任务管理器结束进程——那才是真正丢数据的时刻。有了分母，至少知道还要等多久。
+'
+' 【必须节流】。写 StatusBar 要过一次 COM，一万行的循环里每次都写，
+' 光刷状态栏就比干活还慢。每 25 次写一次，人眼看不出区别。
+'------------------------------------------------------------------------------
+Public Sub SetProgress(ByVal label As String, ByVal current As Long, _
+                       ByVal total As Long, Optional ByVal detail As String = "")
+    If total <= 0 Then Exit Sub
+    ' 首尾必须报，中间节流：否则小批量（总数 < 25）可能一次都不显示
+    If current > 1 And current < total Then
+        If current Mod 25 <> 0 Then Exit Sub
+    End If
+
+    Dim text As String
+    text = label & " " & current & "/" & total
+    If Len(detail) > 0 Then text = text & "：" & detail
+    SetStatus text
+End Sub
+
 Public Sub ClearStatus()
     On Error Resume Next
     Application.StatusBar = False

@@ -25,6 +25,9 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot   = Split-Path -Parent $PSScriptRoot
+
+# 校验 COM 拿到的是真 Excel 而不是 WPS（WPS 会劫持 Excel 的 COM 注册并自称 Microsoft Excel）
+. (Join-Path $RepoRoot "build\_ExcelHost.ps1")
 $Payload    = Join-Path $RepoRoot "dist\ExcelToolbox.xlam"
 $LoaderName = "ExcelToolboxLoader.test.xlam"
 $Loader     = Join-Path $RepoRoot "dist\$LoaderName"
@@ -94,7 +97,7 @@ try {
     Publish-Version "9.0.0"
 
     Write-Host "==> 启动 Excel 并加载【加载器】" -ForegroundColor Cyan
-    $xl = New-Object -ComObject Excel.Application
+    $xl = New-RealExcel
     $xl.Visible = $false
     $xl.DisplayAlerts = $false
     $null = $xl.Workbooks.Add(-4167)
@@ -183,9 +186,13 @@ try {
 
     # 另起两个独立 Excel 进程，同时打开加载器并触发更新
     $concurrent = @(1, 2) | ForEach-Object {
-        Start-Job -ArgumentList $Loader, $LoaderName -ScriptBlock {
-            param($loaderPath, $loaderName)
-            $x = New-Object -ComObject Excel.Application
+        Start-Job -ArgumentList $Loader, $LoaderName, (Join-Path $RepoRoot "build") -ScriptBlock {
+            param($loaderPath, $loaderName, $buildDir)
+            # Start-Job 的 runspace 是全新的，不继承外层 dot-source 进来的函数，
+            # 所以这里要自己再 dot-source 一次——顺带让"别驱动到 WPS"的守卫
+            # 在子进程里同样生效。
+            . (Join-Path $buildDir "_ExcelHost.ps1")
+            $x = New-RealExcel
             $x.Visible = $false
             $x.DisplayAlerts = $false
             $x.EnableEvents = $false
@@ -322,7 +329,7 @@ try {
     [GC]::Collect(); [GC]::WaitForPendingFinalizers()
     Start-Sleep -Milliseconds 800
 
-    $xl = New-Object -ComObject Excel.Application
+    $xl = New-RealExcel
     $xl.Visible = $true
     $xl.DisplayAlerts = $false
     $null = $xl.Workbooks.Add(-4167)

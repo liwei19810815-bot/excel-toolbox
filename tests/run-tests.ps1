@@ -27,6 +27,9 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+# 校验 COM 拿到的是真 Excel 而不是 WPS（WPS 会劫持 Excel 的 COM 注册并自称 Microsoft Excel）
+. (Join-Path $RepoRoot "build\_ExcelHost.ps1")
 $Xlam     = Join-Path $RepoRoot "dist\$OutputName"
 $RibbonXml = Join-Path $RepoRoot "src\package\customUI\customUI14.xml"
 
@@ -138,7 +141,7 @@ function Show-FirstDiff($before, $after) {
 $xl = $null
 try {
     Write-Host "==> 启动 Excel 并加载加载宏" -ForegroundColor Cyan
-    $xl = New-Object -ComObject Excel.Application
+    $xl = New-RealExcel
     # 保持不可见：可见模式下 Excel 会真正创建功能区和窗口，COM 调用时序变得不稳定。
     # 功能测试不需要 UI，Ribbon 是否真的加载由 tests\check-ribbon.ps1 单独验证。
     $xl.Visible = $false
@@ -746,6 +749,29 @@ try {
     $r = & $Run "data.deleteEmptyRows"
     Assert-Match $r "*合并单元格*" "删除空行遇到合并单元格时拒绝执行"
     $ws.Range("A1:B1").UnMerge()
+
+    #==========================================================================
+    Section "宿主能力探测：上下文缺失不能被当成不支持"
+
+    # 这是 modCaps 最容易错的一条路径：图表工作表没有 .Range，
+    # 在它上面探测迷你图会抛错。如果把这次失败缓存成"宿主不支持"，
+    # 用户只要在加载宏装载那一刻停在图表工作表上，迷你图按钮就永久灰掉，
+    # 切回普通工作表也不恢复——而且没有任何提示。
+    $null = $xl.Run("'$OutputName'!Toolbox_ResetCaps")
+
+    $chartSheet = $wb.Charts.Add()
+    $null = $chartSheet.Activate()
+    $capsOnChart = $xl.Run("'$OutputName'!Toolbox_ProbeHost")
+    Assert-Match $capsOnChart "*sparklines=*" "图表工作表上探测不会抛错"
+
+    # 关键断言：切回普通工作表后必须能探出"支持"。
+    # 如果上一步把结论缓存成了 -1，这里就会是 False。
+    $null = $ws.Activate()
+    $capsOnSheet = $xl.Run("'$OutputName'!Toolbox_ProbeHost")
+    Assert-Match $capsOnSheet "*sparklines=True*" "切回工作表后迷你图仍判为支持（未被误缓存为不支持）"
+
+    $xl.DisplayAlerts = $false
+    $chartSheet.Delete()
 
     #==========================================================================
     Section "环境还原"

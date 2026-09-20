@@ -46,22 +46,55 @@ Public Sub App_Shutdown()
 End Sub
 
 '------------------------------------------------------------------------------
-' 宿主探测。WPS 的 Application.Name 返回 "WPS表格" 之类的本地化名称，
-' 因此用「不是 Microsoft Excel 就当作非 Excel」的保守判断。
+' 宿主探测。
+'
+' 【不能靠 Application.Name 判断】——这是实测踩出来的：
+' WPS 表格的 Application.Name 返回的就是字符串 "Microsoft Excel"，
+' 它是刻意伪装成 Excel 的（连 COM ProgID 都会接管）。
+' 原先"名字里有 Microsoft Excel 就是 Excel"的写法，在 WPS 上永远判成 Excel，
+' 整套 SupportedInWps 机制因此从来没生效过。
+'
+' 可靠的判据是安装路径：WPS 的 Application.Path 指向它自己的安装目录
+' （含 WPSOFF… / KINGSO…，注意可能是 8.3 短名）。路径拿不到时再退回看版本号——
+' 真 Excel 从 2016 起都是 16.0，而 WPS 报 12.0。
 '------------------------------------------------------------------------------
 Public Function Host() As HostKind
-    Dim n As String
+    Dim appPath As String, appName As String, appVer As String
+
     On Error Resume Next
-    n = Application.Name
+    appPath = Application.Path
+    appName = Application.Name
+    appVer = Application.Version
     On Error GoTo 0
 
-    If InStr(1, n, "Microsoft Excel", vbTextCompare) > 0 Then
-        Host = HostExcel
-    ElseIf InStr(1, n, "WPS", vbTextCompare) > 0 Or InStr(1, n, "表格") > 0 Then
+    ' 【必须用短名也能命中的前缀】。实测 WPS 的 Application.Path 返回的是
+    ' 8.3 短路径，形如 D:\PROGRA~3\WPSOFF~1\...\office6
+    ' 拿 "WPSOFFICE" 去匹配 "WPSOFF~1" 是匹配不上的——
+    ' 我第一版就栽在这里，改完自以为修好了，一跑才发现还是认不出来。
+    If InStr(1, appPath, "WPSOFF", vbTextCompare) > 0 _
+       Or InStr(1, appPath, "KINGSO", vbTextCompare) > 0 Then
         Host = HostWps
-    Else
-        Host = HostUnknown
+        Exit Function
     End If
+
+    ' 名字本身仍有参考价值：某些 WPS 版本不伪装
+    If InStr(1, appName, "WPS", vbTextCompare) > 0 Then
+        Host = HostWps
+        Exit Function
+    End If
+
+    If InStr(1, appName, "Microsoft Excel", vbTextCompare) > 0 Then
+        ' 伪装成 Excel 但版本号对不上：12.0 是 Excel 2007，而本工具箱
+        ' 最低只支持 2010(14.0)，所以真 Excel 不可能报 12.0 或更低
+        If Val(appVer) > 0 And Val(appVer) < 14 Then
+            Host = HostWps
+        Else
+            Host = HostExcel
+        End If
+        Exit Function
+    End If
+
+    Host = HostUnknown
 End Function
 
 Public Function IsWps() As Boolean

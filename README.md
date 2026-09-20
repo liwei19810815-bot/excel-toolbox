@@ -210,9 +210,20 @@ Office 对象模型隐式成员重名的）都要避开。
 
 ### 兼容性
 
-- Excel 2010–365，32/64 位双支持：所有 `Declare` 用 `#If VBA7` + `PtrSafe` + `LongPtr` 包裹
-- WPS：`clsActionDef.SupportedInWps = False` 的工具在 WPS 下自动灰显，而不是点了才报错
-- `IRibbonUI` 指针在 VBA 工程重置后会失效，`modRibbon` 用 Name + `CopyMemory` 持久化 `ObjPtr` 还原
+实测过的只有 **Excel 2016 (16.0) 64 位 / Windows 11 / 中文**。
+完整的版本下限依据、WPS 实测结论、以及 WPS 劫持 Excel COM 注册的应对，
+见 [docs/兼容性.md](docs/兼容性.md)。
+
+要点：
+
+- **下限是 Excel 2010**（`customUI14` 命名空间决定），2007 不支持
+- **WPS 本机实测不可用**：`VBProject` 返回 Null、`Application.Run` 失败——
+  这台机器的 WPS 没有可用的 VBA 引擎，与本工具箱实现无关
+- **装了 WPS 会劫持 Excel 的 COM 注册**，并且 WPS **自称 "Microsoft Excel"**。
+  所有构建和测试脚本统一走 `build/_ExcelHost.ps1` 的 `New-RealExcel`，
+  拿到 WPS 就直接报错——跑错宿主还全绿比直接报错危险得多
+- `modCaps` 在运行时探测宿主能力，不支持的命令在功能区里灰显，
+  而不是等用户点了才报错
 
 ---
 

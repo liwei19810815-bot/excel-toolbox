@@ -23,6 +23,10 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot  = Split-Path -Parent $PSScriptRoot
+
+# 校验 COM 拿到的是真 Excel 而不是 WPS。安装尤其不能装错宿主：
+# 装到 WPS 的加载项目录里，用户打开 Excel 什么都不会看到，还很难排查。
+. (Join-Path $PSScriptRoot "_ExcelHost.ps1")
 $SrcXlam   = Join-Path $RepoRoot "dist\$OutputName"
 $AddInsDir = Join-Path $env:APPDATA "Microsoft\AddIns"
 $DestXlam  = Join-Path $AddInsDir $OutputName
@@ -33,7 +37,7 @@ if (Get-Process -Name EXCEL -ErrorAction SilentlyContinue) {
     throw "检测到 Excel 正在运行。请先完全关闭 Excel 再执行安装/卸载。"
 }
 
-$xl = New-Object -ComObject Excel.Application
+$xl = New-RealExcel
 try {
     $xl.Visible = $false
     $xl.DisplayAlerts = $false

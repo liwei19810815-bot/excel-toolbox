@@ -13,6 +13,32 @@ Attribute VB_Name = "modIO"
 Option Explicit
 Option Private Module
 
+'==============================================================================
+' MSO（Office 对象库）常量的本地副本。
+'
+' 【绝对不要直接写 msoXxx 常量，也不要用 MsoXxx / FileDialog 这类 MSO 类型声明】。
+'
+' 它们不属于 Excel 类型库，而属于 Office 共享库（MSO）。只要目标宿主的 VBA 工程
+' 没有引用 MSO 库，这些符号在编译期就解析不了——后果和 xlCSVUTF8 那次一模一样：
+' 不是"文件夹对话框用不了"，而是【整个工程编译不过、59 个命令一个都加载不了】。
+'
+' 尤其注意：modCaps 的运行时探测【救不了这件事】。探测是运行期行为，
+' 而符号解析发生在编译期——工程根本轮不到运行起来。
+'
+' 值来自 MSO 类型库的枚举定义：
+'   MsoFileDialogType:     Open=1, SaveAs=2, FilePicker=3, FolderPicker=4
+'   MsoAutomationSecurity: Low=1, ByUI=2, ForceDisable=3
+'   MsoTriState:           msoTrue=-1, msoFalse=0, msoCTrue=1
+'
+' 【msoTrue / msoFalse 同样是 MSO 符号】，很容易漏——它们看起来像语言内置的
+' True/False，实际不是，而且取值也不一样（msoTrue = -1，msoFalse = 0）。
+' 用在 Shapes.AddPicture、Format.Line.Visible 这类地方。
+'==============================================================================
+Public Const MSO_FILEDIALOG_FOLDERPICKER As Long = 4
+Public Const MSO_AUTOMATIONSECURITY_FORCEDISABLE As Long = 3
+Public Const MSO_TRUE As Long = -1
+Public Const MSO_FALSE As Long = 0
+
 '------------------------------------------------------------------------------
 ' 静默打开一个工作簿。打不开就返回 Nothing，由调用方汇总失败清单，
 ' 而不是中断整个批处理——批量任务里一个坏文件不该毁掉其余 99 个。
@@ -24,9 +50,33 @@ Public Function OpenQuiet(ByVal filePath As String) As Workbook
     ' 被批量合并扫到时，它的宏会在我们的进程里直接执行。我们只是来读数据的，
     ' 没有任何理由运行别人文件里的代码——内网共享目录里混进一个带宏的文件，
     ' 这就成了一条现成的执行通道。
-    Dim prevSecurity As MsoAutomationSecurity
+    '
+    ' 【读取和设置都必须包在错误保护里】。宿主不支持这个属性时读它就会抛错，
+    ' 而这两行原本在 On Error Resume Next 之前，异常会一路冒到 RunAction，
+    ' 表现成"合并文件夹整个失败"，而不是"这台机器上这个功能本就该停用"。
+    Dim prevSecurity As Long
+    Dim securityApplied As Boolean
+
+    On Error Resume Next
     prevSecurity = Application.AutomationSecurity
-    Application.AutomationSecurity = msoAutomationSecurityForceDisable
+    If Err.Number = 0 Then
+        Application.AutomationSecurity = MSO_AUTOMATIONSECURITY_FORCEDISABLE
+        ' 【设了不等于生效】——回读确认。拿"我设过了"当保证，
+        ' 正是这类防护最常见的失效方式。
+        If Err.Number = 0 Then
+            securityApplied = (Application.AutomationSecurity = _
+                               MSO_AUTOMATIONSECURITY_FORCEDISABLE)
+        End If
+    End If
+    Err.Clear
+    On Error GoTo 0
+
+    ' 关不掉宏就【不打开】。宁可这个文件算作失败进汇总清单，
+    ' 也不能在没有防护的情况下把可能带 Auto_Open 的文件加载进本进程。
+    If Not securityApplied Then
+        Set OpenQuiet = Nothing
+        Exit Function
+    End If
 
     Dim wb As Workbook
     On Error Resume Next
@@ -62,8 +112,10 @@ End Sub
 ' 让用户选一个文件夹
 '------------------------------------------------------------------------------
 Public Function PickFolder(ByVal title As String) As String
-    Dim dlg As FileDialog
-    Set dlg = Application.FileDialog(msoFileDialogFolderPicker)
+    ' dlg 必须声明为 Object：FileDialog 是 MSO 库的类型，写成强类型就又成了
+    ' 编译期依赖（见本模块顶部的说明）
+    Dim dlg As Object
+    Set dlg = Application.FileDialog(MSO_FILEDIALOG_FOLDERPICKER)
     dlg.title = title
     dlg.AllowMultiSelect = False
     If dlg.Show <> -1 Then modPrompt.Cancel

@@ -28,9 +28,65 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+# 校验 COM 拿到的是真 Excel 而不是 WPS（WPS 会劫持 Excel 的 COM 注册并自称 Microsoft Excel）
+. (Join-Path $RepoRoot "build\_ExcelHost.ps1")
 $Xlam     = Join-Path $RepoRoot "dist\$OutputName"
 
 if (-not (Test-Path $Xlam)) { throw "找不到 $Xlam。请先运行 build\build.ps1。" }
+
+# ---------------------------------------------------------------------------
+# 静态检查：每个按钮都必须把 label / supertip / enabled 交给回调去算。
+#
+# 为什么要查这个：modAction 里写了一整套 IsActionEnabled（问 modCaps 当前宿主
+# 支不支持）和 ActionLabel（自动加"…"和"撤销 XXX"），但只要 XML 里漏挂
+# getEnabled / getLabel，这些逻辑就【一次都不会被调用】——按钮照样亮着、
+# 照样显示写死的旧名字，而 VBA 编译通过、功能测试全绿，没有任何东西会报警。
+# 改版之前就是这个状态：59 个按钮里只有 1 个挂了 getEnabled。
+# ---------------------------------------------------------------------------
+$XmlPath = Join-Path $RepoRoot "src\package\customUI\customUI14.xml"
+if (-not (Test-Path $XmlPath)) { throw "找不到 $XmlPath。" }
+
+Write-Host "==> 静态检查：功能区回调接线" -ForegroundColor Cyan
+[xml]$rx = Get-Content -LiteralPath $XmlPath -Raw -Encoding UTF8
+$ns = New-Object System.Xml.XmlNamespaceManager($rx.NameTable)
+$ns.AddNamespace("ui", "http://schemas.microsoft.com/office/2009/07/customui")
+
+$wiringErrors = @()
+$seenTags = @{}
+foreach ($node in $rx.SelectNodes("//ui:button | //ui:toggleButton", $ns)) {
+    $id = $node.GetAttribute("id")
+    $tag = $node.GetAttribute("tag")
+
+    if ([string]::IsNullOrWhiteSpace($tag)) {
+        $wiringErrors += "$id : 缺少 tag（actionId）"
+        continue
+    }
+    if ($seenTags.ContainsKey($tag)) {
+        $wiringErrors += "$id : tag「$tag」与 $($seenTags[$tag]) 重复"
+    } else {
+        $seenTags[$tag] = $id
+    }
+
+    foreach ($cb in @("getLabel", "getEnabled", "getSupertip")) {
+        if ([string]::IsNullOrWhiteSpace($node.GetAttribute($cb))) {
+            $wiringErrors += "$id ($tag) : 缺少 $cb"
+        }
+    }
+    # 写死的字面量会和注册表打架，两边说得不一样
+    foreach ($lit in @("label", "supertip", "screentip")) {
+        if (-not [string]::IsNullOrWhiteSpace($node.GetAttribute($lit))) {
+            $wiringErrors += "$id ($tag) : 不该写死 $lit=，改由注册表生成"
+        }
+    }
+}
+
+if ($wiringErrors.Count -gt 0) {
+    Write-Host "功能区接线检查未通过：" -ForegroundColor Red
+    $wiringErrors | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+    exit 1
+}
+Write-Host "    $($seenTags.Count) 个按钮，回调接线完整" -ForegroundColor Green
 
 $preExisting = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 
@@ -38,7 +94,7 @@ $ok = $false
 $xl = $null
 try {
     Write-Host "==> 启动可见的 Excel（功能区只有在这种模式下才会创建）" -ForegroundColor Cyan
-    $xl = New-Object -ComObject Excel.Application
+    $xl = New-RealExcel
     $xl.Visible = $true
     $xl.DisplayAlerts = $false
     $null = $xl.Workbooks.Add(-4167)

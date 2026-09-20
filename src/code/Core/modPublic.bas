@@ -29,6 +29,18 @@ Public Function Toolbox_SelfCheck() As String
     Toolbox_SelfCheck = parts
 End Function
 
+' 宿主能力报告。拿到 WPS / Office 2024 / 32 位 Excel 上跑一次，
+' 就知道那台机器上到底什么能用——比任何静态推算都可靠。
+Public Function Toolbox_ProbeHost() As String
+    Toolbox_ProbeHost = modCaps.Report()
+End Function
+
+' 清空宿主能力缓存。供回归测试构造"先在图表工作表上探测、再切回普通工作表"
+' 这种场景——那是 modCaps 最容易误判的路径（图表工作表没有 .Range）。
+Public Sub Toolbox_ResetCaps()
+    modCaps.Reset
+End Sub
+
 ' 所有已注册的 actionId，换行分隔。供测试脚本与 customUI14.xml 里的 tag 做一致性比对。
 Public Function Toolbox_ListActions() As String
     Toolbox_ListActions = modAction.AllActionIds()

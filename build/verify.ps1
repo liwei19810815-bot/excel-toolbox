@@ -22,6 +22,9 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+# 校验 COM 拿到的是真 Excel 而不是 WPS（WPS 会劫持 Excel 的 COM 注册并自称 Microsoft Excel）
+. (Join-Path $PSScriptRoot "_ExcelHost.ps1")
 $Xlam     = Join-Path $RepoRoot "dist\$OutputName"
 
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -34,7 +37,7 @@ $failed = $false
 
 try {
     Write-Step "启动 Excel 并加载加载宏"
-    $xl = New-Object -ComObject Excel.Application
+    $xl = New-RealExcel
     $xl.Visible = $false
     $xl.DisplayAlerts = $false
 

@@ -254,9 +254,9 @@ End Function
 Private Sub ApplyChartStyle(ByVal cht As Chart)
     On Error Resume Next
 
-    cht.ChartArea.Format.Line.Visible = msoFalse
+    cht.ChartArea.Format.Line.Visible = modIO.MSO_FALSE
     cht.ChartArea.Font.Size = 10
-    cht.PlotArea.Format.Fill.Visible = msoFalse
+    cht.PlotArea.Format.Fill.Visible = modIO.MSO_FALSE
 
     ' 只有一个系列时图例没有信息量
     If cht.SeriesCollection.Count <= 1 Then
