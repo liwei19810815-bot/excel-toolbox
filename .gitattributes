@@ -1,0 +1,39 @@
+# VBA 源码必须是 CRLF。
+#
+# 这不是风格偏好，是硬要求：VBE 的 Import 按 CRLF 断行。
+# 用 LF 的 .cls 导进去会【丢掉 VERSION/BEGIN 头】，被当成标准模块而不是类模块，
+# 构建出来的加载宏少一个类，而且报错信息完全指不到这里。
+# 早期就是这么踩坑的，所以这里强制固定，不受 core.autocrlf 影响。
+*.bas    text eol=crlf
+*.cls    text eol=crlf
+*.frm    text eol=crlf
+*.doccls text eol=crlf
+
+# .frx 是 UserForm 的二进制资源，绝对不能做换行转换（本项目暂未使用）
+*.frx    binary
+
+# PowerShell 脚本固定 CRLF。
+#
+# 另外注意（git 管不了、但改文件时必须守住）：.ps1 必须存成
+# 【UTF-8 with BOM】。没有 BOM 的话，中文 Windows 上的 powershell.exe
+# 会按 GBK 解码，脚本里的中文注释和字符串直接变成语法错误。
+*.ps1    text eol=crlf
+
+# 加载宏本身是 zip 包
+*.xlam   binary
+*.xlsx   binary
+*.xlsm   binary
+*.xlsb   binary
+*.xls    binary
+
+# 文档与配置用 LF 即可
+*.md     text eol=lf
+*.xml    text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.json   text eol=lf
+
+# GitHub 语言统计：别把构建脚本算成项目主语言
+*.ps1    linguist-language=PowerShell
+*.bas    linguist-language=VBA
+*.cls    linguist-language=VBA
