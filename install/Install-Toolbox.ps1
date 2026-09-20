@@ -69,7 +69,12 @@ public static extern int GetWindowThreadProcessId(System.IntPtr hWnd, out int lp
 '@
 }
 
-function Get-OwnExcelPid {
+# 返回 @{ Id = <pid>; Ticks = <启动时间> }。取不到返回 $null。
+#
+# 【必须连启动时间一起记】：进程退出后 PID 会被系统回收复用，
+# 只凭 PID 去强制结束，可能杀掉一个恰好拿到同一号码的无关进程——
+# 在用户机器上那可能是他正在编辑的另一个 Excel。
+function Get-OwnExcelProcess {
     param($App)
     for ($i = 0; $i -lt 10; $i++) {
         try {
@@ -77,16 +82,21 @@ function Get-OwnExcelPid {
             if ($hwnd -ne [System.IntPtr]::Zero) {
                 $procId = 0
                 [void][ToolboxSetup.Win32]::GetWindowThreadProcessId($hwnd, [ref]$procId)
-                if ($procId -gt 0) { return $procId }
+                if ($procId -gt 0) {
+                    $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                    if ($p) {
+                        return @{ Id = $procId; Ticks = $p.StartTime.Ticks }
+                    }
+                }
             }
         } catch {}
         Start-Sleep -Milliseconds 200
     }
-    return 0
+    return $null
 }
 
 function Stop-ExcelSafely {
-    param($App, [int]$OwnPid)
+    param($App, $Own)
 
     if ($App) {
         try { $App.DisplayAlerts = $false } catch {}
@@ -96,18 +106,31 @@ function Stop-ExcelSafely {
     }
     [GC]::Collect(); [GC]::WaitForPendingFinalizers()
 
-    if ($OwnPid -le 0) { return }
+    if (-not $Own) { return }
 
-    # 给它几秒自己退；退不掉就强制结束——那是本程序起的实例，不是用户的
+    # 先给它几秒自己退
     for ($i = 0; $i -lt 10; $i++) {
-        $p = Get-Process -Id $OwnPid -ErrorAction SilentlyContinue
-        if (-not $p) { return }
+        if (-not (Test-OwnProcessAlive $Own)) { return }
         Start-Sleep -Milliseconds 500
     }
-    $p = Get-Process -Id $OwnPid -ErrorAction SilentlyContinue
-    if ($p -and $p.ProcessName -eq 'EXCEL') {
-        try { Stop-Process -Id $OwnPid -Force } catch {}
+
+    # 还在就强制结束——但只结束【确认是我们自己那一个】的
+    if (Test-OwnProcessAlive $Own) {
+        try { Stop-Process -Id $Own.Id -Force } catch {}
     }
+}
+
+# 这个进程还在，并且确实是我们启动的那一个（PID + 进程名 + 启动时间都要对上）
+function Test-OwnProcessAlive {
+    param($Own)
+    try {
+        $p = Get-Process -Id $Own.Id -ErrorAction SilentlyContinue
+        if (-not $p) { return $false }
+        if ($p.ProcessName -ne 'EXCEL') { return $false }
+        if ($p.StartTime.Ticks -ne $Own.Ticks) { return $false }   # PID 被复用了
+        return $true
+    }
+    catch { return $false }
 }
 
 function Say      ($m) { Write-Host $m }
@@ -167,10 +190,10 @@ if (-not $Uninstall) {
 #-----------------------------------------------------------------------------
 # 卸载时要卸掉【实际装进去的那个】，不能写死文件名。
 #
-# 本程序可能装的是 ExcelToolbox.xlam，也可能是带自动更新的
-# ExcelToolboxLoader.xlam（安装时会优先选后者）。卸载默认死 ExcelToolbox.xlam
-# 的话，装了加载器的机器上会卸不干净：文件还在、加载项还勾着，
-# 用户以为卸载成功了。
+# 本程序可能装的是独立版 ExcelToolbox.xlam，也可能是带自动更新的
+# ExcelToolboxLoader.xlam（取决于分发包里放的是哪一个）。
+# 卸载写死 ExcelToolbox.xlam 的话，装了加载器的机器上会卸不干净：
+# 文件还在、加载项还勾着，用户以为卸载成功了。
 #
 # 判断依据是加载项目录里实际存在哪些属于本工具箱的文件。
 #-----------------------------------------------------------------------------
@@ -230,10 +253,10 @@ if ($Uninstall) {
 
     Step "取消勾选并删除加载宏"
     $xl = $null
-    $xlPid = 0
+    $xlOwn = $null
     try {
         $xl = New-Object -ComObject Excel.Application
-        $xlPid = Get-OwnExcelPid $xl
+        $xlOwn = Get-OwnExcelProcess $xl
         $xl.Visible = $false
         $xl.DisplayAlerts = $false
         foreach ($a in @($xl.AddIns)) {
@@ -244,7 +267,7 @@ if ($Uninstall) {
     }
     catch { Warn "无法通过 Excel 取消勾选：$($_.Exception.Message)" }
     finally {
-        Stop-ExcelSafely $xl $xlPid
+        Stop-ExcelSafely $xl $xlOwn
     }
 
     $anyRemoved = $false
@@ -329,12 +352,12 @@ try {
 
 Step "在 Excel 中启用加载项"
 $xl = $null
-$xlPid = 0
+$xlOwn = $null
 $registered = $false
 $excelVersion = ""
 try {
     $xl = New-Object -ComObject Excel.Application
-    $xlPid = Get-OwnExcelPid $xl
+    $xlOwn = Get-OwnExcelProcess $xl
     $xl.Visible = $false
     $xl.DisplayAlerts = $false
     try { $excelVersion = [string]$xl.Version } catch {}
@@ -376,7 +399,7 @@ finally {
     # 加载器的 Workbook_Open 又会打开载荷工作簿，此时 Quit() 不一定能退出——
     # 实测留下过一个"Excel 开始屏幕"进程赖在后台，
     # 把下一次安装/卸载直接卡死在"检测到 Excel 正在运行"。
-    Stop-ExcelSafely $xl $xlPid
+    Stop-ExcelSafely $xl $xlOwn
 }
 
 # 【注册失败就把刚复制进去的文件收回来】。

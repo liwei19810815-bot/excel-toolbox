@@ -146,6 +146,40 @@ function Get-ExcelProcessId {
     return 0
 }
 
+# 这个 PID 现在还活着吗？
+#
+# 【"查不到"和"查询失败"必须分开】。直接用 `-not (Get-Process -Id x)` 判断，
+# 查询本身出错时也返回空，会被当成"进程已退出"——结论正好反了，
+# 于是锁文件被删、孤儿留下。所以查询异常时一律按【还活着】处理：
+# 宁可多保留一轮锁文件，也不能漏掉一个孤儿。
+function Test-ProcessAlive {
+    param([int]$ProcId)
+    try {
+        return [bool](Get-Process -Id $ProcId -ErrorAction Stop)
+    }
+    catch [Microsoft.PowerShell.Commands.ProcessCommandException] {
+        return $false          # 明确的"没有这个进程"
+    }
+    catch {
+        return $true           # 其它异常：判断不了，按还活着处理
+    }
+}
+
+# 这个进程确实是我们登记的那一个吗？
+# 【PID + 进程名 + 启动时间三者都要对上】——PID 会被系统回收复用，
+# 只认 PID 就可能杀掉一个恰好拿到同一号码的无关进程。
+function Test-OwnedProcess {
+    param($Owned)
+    try {
+        $p = Get-Process -Id $Owned.Id -ErrorAction SilentlyContinue
+        if (-not $p) { return $false }
+        if ($p.ProcessName -ne 'EXCEL' -and $p.ProcessName -notin @('et','wps')) { return $false }
+        if ($p.StartTime.Ticks -ne $Owned.Ticks) { return $false }
+        return $true
+    }
+    catch { return $false }    # 属性读不到就不动它，宁可不杀也不误杀
+}
+
 # 登记失败时的兜底：把刚创建、还没来得及登记的实例就地关掉。
 #
 # 【不做这件事，"报错"本身就会制造孤儿】——登记失败抛异常，而那个 Excel
@@ -162,9 +196,15 @@ function Stop-UnregisteredExcel {
     [GC]::Collect(); [GC]::WaitForPendingFinalizers()
 
     if ($ProcId -gt 0) {
-        $p = $null
-        try { $p = Get-Process -Id $ProcId -ErrorAction SilentlyContinue } catch {}
-        if ($p) { try { Stop-Process -Id $ProcId -Force } catch {} }
+        # 【杀之前确认它确实是个 Excel/WPS 进程】。这个 PID 是几秒前从活着的
+        # COM 对象上取到的，复用概率极低，但一次误杀的代价是用户的未保存文件，
+        # 所以还是要认一下身份再动手。
+        try {
+            $p = Get-Process -Id $ProcId -ErrorAction SilentlyContinue
+            if ($p -and ($p.ProcessName -eq 'EXCEL' -or $p.ProcessName -in @('et','wps'))) {
+                Stop-Process -Id $ProcId -Force
+            }
+        } catch {}
     }
 }
 
@@ -237,25 +277,23 @@ function Close-ExcelInstance {
     Start-Sleep -Milliseconds 500
 
     foreach ($o in $script:ExcelOwned) {
-        $p = Get-Process -Id $o.Id -ErrorAction SilentlyContinue
-        if (-not $p) { continue }
-        if ($p.ProcessName -ne 'EXCEL' -and $p.ProcessName -notin @('et','wps')) { continue }
-        if ($p.StartTime.Ticks -ne $o.Ticks) { continue }     # PID 被复用了，不是我的
+        # 【进程属性访问全部要保护】。进程可能在 Get-Process 之后、读属性之前
+        # 就退出了，那时访问 ProcessName / StartTime 会抛异常，
+        # 整个清理循环就断在这里，后面的实例一个都收不掉。
+        if (-not (Test-OwnedProcess $o)) { continue }
 
-        try { Stop-Process -Id $p.Id -Force } catch {}
+        try { Stop-Process -Id $o.Id -Force } catch {}
 
         # 【要等它真的退出再往下走】。Stop-Process 是异步的，立刻去删锁文件
         # 就会出现"锁文件没了、进程还在"的窗口——那正是孤儿逃掉的缝隙。
         #
-        # HasExited 在进程对象失效时会抛异常，必须包起来；
         # 判断不了就按"没退出"处理——保留锁文件总比漏掉一个孤儿强。
+        # 【不能用 `-not (Get-Process ...)` 当回退判据】：Get-Process 查询本身
+        # 失败时也返回空，那会被当成"已退出"，恰好把结论倒过来。
         $exited = $false
-        try {
-            $p.WaitForExit(5000) | Out-Null
-            $exited = $p.HasExited
-        }
-        catch {
-            $exited = -not (Get-Process -Id $o.Id -ErrorAction SilentlyContinue)
+        for ($i = 0; $i -lt 10; $i++) {
+            if (-not (Test-ProcessAlive $o.Id)) { $exited = $true; break }
+            Start-Sleep -Milliseconds 500
         }
 
         if (-not $exited) {
@@ -292,8 +330,11 @@ function New-RealExcel {
     try { $ver  = $xl.Version } catch {}
 
     if (Test-IsWpsHost $xl) {
-        try { $xl.Quit() } catch {}
-        try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl) } catch {}
+        # 【登记之后的每一条异常出口都必须走 Close-ExcelInstance】。
+        # 这里原先只调 Quit + Release：实例是关了，但 $script:ExcelOwned 里
+        # 那条记录和磁盘上的锁文件都还在，下一轮 Clear-StaleExcel 会对着一个
+        # 早就没了的 PID 空转，而真正的问题（WPS 劫持）反而被这些噪音盖住。
+        Close-ExcelInstance $xl
 
         throw @"
 COM 自动化拿到的不是 Microsoft Excel，而是 WPS：
