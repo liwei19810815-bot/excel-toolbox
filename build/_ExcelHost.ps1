@@ -103,16 +103,34 @@ function Clear-StaleExcel {
         # 【这里同样不能用"查不到就当它没了"】：Test-ProcessAlive 在查询失败时
         # 返回 $true（按还活着处理），于是我们会跳过这个锁文件而不是抢它的进程。
         $ownerPid = 0
-        if ($f.BaseName -match '^run_(\d+)$') { $ownerPid = [int]$Matches[1] }
+        if ($f.BaseName -match '^run_(\d+)$') {
+            $ownerPid = [int]$Matches[1]
+        } else {
+            # 【文件名认不出来就别碰它】。认不出创建者是谁，就无从判断
+            # 那一轮是不是还在跑，更没有依据去删它的锁文件。
+            Write-Host "    警告：无法识别的锁文件，已跳过：$($f.Name)" -ForegroundColor DarkYellow
+            continue
+        }
         if ($ownerPid -eq $PID) { continue }
-        if ($ownerPid -gt 0 -and (Test-ProcessAlive $ownerPid)) { continue }
+        if (Test-ProcessAlive $ownerPid) { continue }
 
         # 【锁文件能不能删，取决于里面每一条都处理干净了】。
         # 原来是不管结果如何都删——只要有一条查询失败（被当成"进程不存在"而跳过），
         # 那个仍然活着的 Excel 就此失去锁记录，再没有任何一轮能追踪到它。
         $allResolved = $true
 
-        foreach ($line in (Get-Content -LiteralPath $f.FullName -ErrorAction SilentlyContinue)) {
+        # 【读不出来 ≠ 里面没东西】。Get-Content 静默失败会返回空集合，
+        # 循环一次都不进，$allResolved 保持 True，锁文件就被删了——
+        # 而里面登记的那些 Excel 可能还活着，从此再没有任何凭据能追踪到它们。
+        # 这正是本函数要防的事，不能自己踩进去。
+        $lines = $null
+        try { $lines = @(Get-Content -LiteralPath $f.FullName -ErrorAction Stop) }
+        catch {
+            Write-Host "    警告：锁文件读取失败，保留待下轮处理：$($f.Name)" -ForegroundColor DarkYellow
+            continue        # 不删、不处理，留给下一轮
+        }
+
+        foreach ($line in $lines) {
             # 每行格式：<pid>|<启动时间 ticks>
             $parts = $line -split '\|'
             if ($parts.Count -ne 2) { continue }      # 格式坏了，这条没法追，不算未处理
