@@ -131,14 +131,26 @@ function Clear-StaleExcel {
         }
 
         foreach ($line in $lines) {
-            # 每行格式：<pid>|<启动时间 ticks>
-            $parts = $line -split '\|'
-            if ($parts.Count -ne 2) { continue }      # 格式坏了，这条没法追，不算未处理
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }   # 空行不是记录
 
+            # 每行格式：<pid>|<启动时间 ticks>
+            #
+            # 【解析不出来 ≠ 没事可做】。这一行的存在本身就说明"当时登记过一个进程"，
+            # 只是现在读不懂它是谁。那属于 Unknown：既没法去关它，
+            # 也不能把这条记录连同锁文件一起丢掉——丢了就再也追不回来。
+            # 原先这三处都是直接 continue，等于把"认不出的登记"当成"不存在的登记"。
+            $parts = $line -split '\|'
             $pid2 = 0
             $ticks = 0L
-            if (-not [int]::TryParse($parts[0], [ref]$pid2))   { continue }
-            if (-not [long]::TryParse($parts[1], [ref]$ticks)) { continue }
+
+            if ($parts.Count -ne 2 -or
+                -not [int]::TryParse($parts[0], [ref]$pid2) -or
+                -not [long]::TryParse($parts[1], [ref]$ticks)) {
+
+                Write-Host "    警告：锁文件里有无法解析的登记，保留待人工处理：$($f.Name)" -ForegroundColor DarkYellow
+                $allResolved = $false
+                continue
+            }
 
             $owned = @{ Id = $pid2; Ticks = $ticks }
             switch (Get-OwnedProcessState $owned) {
@@ -164,6 +176,12 @@ function Clear-StaleExcel {
             }
         }
 
+        # 空锁文件（$lines 为空）会走到这里并被删除，这是【有意的】：
+        # 写入路径是"先写 .tmp 再 Move-Item 改名"，原子操作，
+        # 而且只有 $script:ExcelOwned 非空时才会写。
+        # 所以本程序【不可能】产出一个内容丢失的空锁文件——
+        # 空文件就是真的没有登记，没有任何东西可追踪。
+        # 反过来若把空文件也留着，它会永远留在 TEMP 里、每轮都告警一次。
         if ($allResolved) {
             Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
         }
