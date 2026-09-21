@@ -243,20 +243,46 @@ function Install-AI {
     # 注册值都已经存在，我们会覆盖它们；如果后面某一步失败，只是"不删除"
     # 并不能还原——用户原来能用的那份配置已经被我们改掉了。
     # 备份的代价是几 KB 内存，换的是"失败之后至少回到原样"。
+    # 【备份拿不到就别开工】。原先读失败是吞掉继续装，那等于明知
+    # "失败了还不回去"还照样覆盖用户原有的配置——回滚承诺当场作废，
+    # 而用户只会在失败信息里看到一行"无备份可还原"。
+    # 没有可恢复的快照时，正确做法是根本不要动他的东西。
     $manifest = Join-Path $AITargetDir "manifest.xml"
     $manifestExistedBefore = Test-Path -LiteralPath $manifest
     $manifestBackup = $null
+    $hasManifestBackup = $false
     if ($manifestExistedBefore) {
-        try { $manifestBackup = [IO.File]::ReadAllText($manifest, [Text.UTF8Encoding]::new($false)) } catch {}
+        try {
+            $manifestBackup = [IO.File]::ReadAllText($manifest, [Text.UTF8Encoding]::new($false))
+            $hasManifestBackup = $true
+        }
+        catch {
+            Bad "读不到现有的 manifest，无法保证失败时能还原：$($_.Exception.Message)"
+            Say "     为避免覆盖掉你现在能用的配置，已中止安装。"
+            Say "     可手工删除后重试：$manifest"
+            return $false
+        }
     }
 
+    # 【"没有原值"和"原值是空串"必须分开记】。只看 -ne "" 的话，
+    # 原本就是空值的注册项在回滚时会被【删掉】而不是还原成空值——
+    # 状态对不上，而且没有任何测试会因此变红。manifest 同理。
     $regBackup = $null
+    $hasRegBackup = $false
     try {
-        $p = Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue
-        if ($p -and $p.PSObject.Properties.Name -contains $AITargetDir) {
-            $regBackup = $p.$AITargetDir
+        if (Test-Path $WefDeveloper) {
+            $p = Get-ItemProperty -Path $WefDeveloper -ErrorAction Stop
+            if ($p -and $p.PSObject.Properties.Name -contains $AITargetDir) {
+                $regBackup = [string]$p.$AITargetDir
+                $hasRegBackup = $true
+            }
         }
-    } catch {}
+    }
+    catch {
+        Bad "读不到现有的注册项，无法保证失败时能还原：$($_.Exception.Message)"
+        Say "     为避免覆盖掉你现在能用的配置，已中止安装。"
+        return $false
+    }
 
     # --- 1. 生成专属 manifest ---
     #
@@ -281,7 +307,8 @@ function Install-AI {
         Bad "manifest 生成失败：$($_.Exception.Message)"
         Undo-AIPartialInstall -RegWritten $false -ManifestPath $manifest `
                               -ManifestExistedBefore $manifestExistedBefore `
-                              -ManifestBackup $manifestBackup -RegBackup $regBackup
+                              -ManifestBackup $manifestBackup -RegBackup $regBackup `
+                              -HasManifestBackup $hasManifestBackup -HasRegBackup $hasRegBackup
         return $false
     }
 
@@ -308,7 +335,8 @@ function Install-AI {
         Bad "注册失败：$($_.Exception.Message)"
         Undo-AIPartialInstall -RegWritten $regWritten -ManifestPath $manifest `
                               -ManifestExistedBefore $manifestExistedBefore `
-                              -ManifestBackup $manifestBackup -RegBackup $regBackup
+                              -ManifestBackup $manifestBackup -RegBackup $regBackup `
+                              -HasManifestBackup $hasManifestBackup -HasRegBackup $hasRegBackup
         return $false
     }
 
@@ -345,7 +373,8 @@ function Install-AI {
             Bad "CA 证书安装失败：$caMsg"
             Undo-AIPartialInstall -RegWritten $regWritten -ManifestPath $manifest `
                                   -ManifestExistedBefore $manifestExistedBefore `
-                                  -ManifestBackup $manifestBackup -RegBackup $regBackup
+                                  -ManifestBackup $manifestBackup -RegBackup $regBackup `
+                              -HasManifestBackup $hasManifestBackup -HasRegBackup $hasRegBackup
             Say  "     已回滚，避免「按钮能点但打不开」的状态。"
             return $false
         }
@@ -372,7 +401,14 @@ function Undo-AIPartialInstall {
         [string]$ManifestPath,
         [bool]$ManifestExistedBefore,
         [string]$ManifestBackup,
-        [string]$RegBackup
+        [string]$RegBackup,
+
+        # 【"有没有原值"必须单独传一个布尔】，不能靠 $RegBackup -ne "" 推断：
+        # 原值本来就是空串时，推断的结果是"没有原值"，于是回滚去【删】它，
+        # 而正确行为是还原成空串。参数声明成 [string] 之后 $null 会被
+        # 绑定成 ""，两种情况在函数里根本区分不开。
+        [bool]$HasManifestBackup,
+        [bool]$HasRegBackup
     )
 
     # --- 注册项 ---
@@ -380,7 +416,7 @@ function Undo-AIPartialInstall {
     # 一律删的话，重装失败会把用户本来好好的那条注册项也抹掉。
     if ($RegWritten) {
         try {
-            if ($null -ne $RegBackup -and $RegBackup -ne "") {
+            if ($HasRegBackup) {
                 New-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Value $RegBackup `
                                  -PropertyType String -Force | Out-Null
                 Say "     已还原注册项原值。"
@@ -398,13 +434,15 @@ function Undo-AIPartialInstall {
 
     # --- manifest ---
     if ($ManifestExistedBefore) {
-        if ($null -ne $ManifestBackup -and $ManifestBackup -ne "") {
+        if ($HasManifestBackup) {
             try {
                 [IO.File]::WriteAllText($ManifestPath, $ManifestBackup, [Text.UTF8Encoding]::new($false))
                 Say "     已还原原 manifest。"
             } catch { Warn "还原原 manifest 失败：$($_.Exception.Message)" }
         } else {
-            # 之前存在但没备份成功（读文件就出错了）——如实说，别假装还原了
+            # 正常走不到这里：备份读失败时 Install-AI 已经中止，根本不会开始覆盖。
+            # 留着是兜底——万一将来有人把那道中止去掉，至少要如实说出来，
+            # 而不是假装还原过。
             Warn "原 manifest 已被覆盖且无备份可还原：$ManifestPath"
         }
     }

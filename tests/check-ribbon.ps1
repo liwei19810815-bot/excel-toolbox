@@ -100,11 +100,32 @@ try {
     $null = $xl.Workbooks.Open($Xlam)
 
     Write-Host "==> 等待 onLoad 触发" -ForegroundColor Cyan
+
+    # 【每次调用都要各自兜异常】。Excel 刚起来、还在忙着加载加载宏时，
+    # COM 调用会被拒绝（RPC_E_CALL_REJECTED「应用程序正忙」）——
+    # 这是【暂时】的，下一轮就好了。原先没有这层兜底，一次这样的瞬时
+    # 错误会直接跳到外层 catch，整套判成失败并 exit 1，
+    # 而实际上功能区完全正常。实测在 run-all 的连跑里偶发过一次：
+    # 单独重跑立刻就绿，这种"随机变红"最能把人训练成忽略红色。
+    #
+    # 轮询上限也放宽到 30 次（约 24 秒）：连跑时 Excel 是冷启动，
+    # 前面几套刚折腾完，12 秒不一定够。
     $sc = ""
-    for ($i = 1; $i -le 15; $i++) {
+    $lastErr = ""
+    for ($i = 1; $i -le 30; $i++) {
         Start-Sleep -Milliseconds 800
-        $sc = $xl.Run("'$OutputName'!Toolbox_SelfCheck")
-        if ($sc -like "*ribbon=True") { $ok = $true; break }
+        try {
+            $sc = $xl.Run("'$OutputName'!Toolbox_SelfCheck")
+            $lastErr = ""
+            if ($sc -like "*ribbon=True") { $ok = $true; break }
+        }
+        catch {
+            # 记下来但继续等——真的起不来的话，循环跑完照样会判失败
+            $lastErr = $_.Exception.Message
+        }
+    }
+    if (-not $ok -and $lastErr) {
+        Write-Host "    最后一次调用仍在报错：$lastErr" -ForegroundColor DarkYellow
     }
 
     Write-Host "    $sc" -ForegroundColor DarkGray
