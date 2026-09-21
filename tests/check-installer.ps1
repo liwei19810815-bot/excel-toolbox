@@ -370,6 +370,84 @@ try {
     Assert-Equal 0 (Get-WefEntryCount) "回滚用例收尾后无残留注册项"
 
     #=========================================================================
+    # 服务端可见性开关：0 不可见 / 1 可见可使用 / 2 可见但置灰
+    #
+    # 【0 只能在安装侧兑现】。Office.js 没有隐藏内置选项卡上按钮的能力，
+    # 任务窗格最多把按钮置灰，而且要等加载项跑起来之后才生效。
+    # 所以"真正看不见"＝安装时就不注册，这一节守的就是这条。
+    #
+    # 用 HttpListener 起一个假网关，不依赖 node，也不碰真实网络。
+    #=========================================================================
+    Section "服务端可见性开关"
+
+    $port = 18731
+    $gwUrl = "http://localhost:$port"
+
+    function Start-FakeGateway([int]$Visibility) {
+        $job = Start-Job -ScriptBlock {
+            param($p, $v)
+            $l = New-Object System.Net.HttpListener
+            $l.Prefixes.Add("http://localhost:$p/")
+            $l.Start()
+            try {
+                # 只服务有限次请求，避免测试异常时这个 job 永远挂着
+                for ($i = 0; $i -lt 6; $i++) {
+                    $ctx = $l.GetContext()
+                    $body = [Text.Encoding]::UTF8.GetBytes("{""visibility"":$v,""mode"":""byok""}")
+                    $ctx.Response.ContentType = "application/json"
+                    $ctx.Response.OutputStream.Write($body, 0, $body.Length)
+                    $ctx.Response.Close()
+                }
+            } finally { $l.Stop() }
+        } -ArgumentList $port, $Visibility
+        Start-Sleep -Milliseconds 700
+        return $job
+    }
+
+    # --- 可见性 0：不注册，什么都不留 ---
+    $gwJob = Start-FakeGateway 0
+    try {
+        $s10 = New-Stage -WithAI -Gateway $gwUrl; $stages += $s10
+        $out = Invoke-Installer $s10 "" @("-AIOnly")
+        Assert-Match $out "*服务端已关闭 AI 功能*" "可见性 0：安装程序说明跳过原因"
+        Assert-Equal 0 (Get-WefEntryCount) "可见性 0：不写注册项"
+        Assert-Equal $false (Test-Path (Join-Path $AITargetDir "manifest.xml")) "可见性 0：不生成 manifest"
+    } finally { Stop-Job $gwJob -ErrorAction SilentlyContinue; Remove-Job $gwJob -Force -ErrorAction SilentlyContinue }
+
+    # --- 可见性 0 且【之前装过】：必须把旧的移除 ---
+    # 这条守的是"开关对老用户无效"——而老用户恰恰是最多的那批。
+    $s11 = New-Stage -WithAI; $stages += $s11
+    $null = Invoke-Installer $s11 "" @("-AIOnly")
+    Assert-Equal 1 (Get-WefEntryCount) "前置：先正常装上一份"
+
+    $gwJob = Start-FakeGateway 0
+    try {
+        $s12 = New-Stage -WithAI -Gateway $gwUrl; $stages += $s12
+        $out = Invoke-Installer $s12 "" @("-AIOnly")
+        Assert-Match $out "*正在移除*" "可见性 0：发现装过就移除"
+        Assert-Equal 0 (Get-WefEntryCount) "可见性 0：老用户的注册项被清掉"
+    } finally { Stop-Job $gwJob -ErrorAction SilentlyContinue; Remove-Job $gwJob -Force -ErrorAction SilentlyContinue }
+
+    # --- 可见性 2：照常装，但要告知会被停用 ---
+    $gwJob = Start-FakeGateway 2
+    try {
+        $s13 = New-Stage -WithAI -Gateway $gwUrl; $stages += $s13
+        $out = Invoke-Installer $s13 "" @("-AIOnly")
+        Assert-Match $out "*可见但不可用*" "可见性 2：提示按钮会被停用"
+        Assert-Equal 1 (Get-WefEntryCount) "可见性 2：仍然注册（按钮在，运行时置灰）"
+        $null = Invoke-Installer $s13 "2" @()
+    } finally { Stop-Job $gwJob -ErrorAction SilentlyContinue; Remove-Job $gwJob -Force -ErrorAction SilentlyContinue }
+
+    # --- 网关不可达：照常装 ---
+    # 【治理开关不是安全闸】。网关抖一下就让新员工装不上，
+    # 代价比"多装了一个用不了的按钮"大得多；真要关，运行时还会再拦一道。
+    $s14 = New-Stage -WithAI -Gateway "http://localhost:1"; $stages += $s14
+    $out = Invoke-Installer $s14 "" @("-AIOnly")
+    Assert-Equal 1 (Get-WefEntryCount) "网关连不上时照常安装，不把人挡在外面"
+    $null = Invoke-Installer $s14 "2" @()
+    Assert-Equal 0 (Get-WefEntryCount) "可见性用例收尾后无残留"
+
+    #=========================================================================
     Section "IT 非交互部署"
 
     $s5 = New-Stage; $stages += $s5

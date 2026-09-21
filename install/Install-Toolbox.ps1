@@ -217,6 +217,42 @@ function Test-AIInstalled {
 #
 # 【不装证书】。网关必须用已被客户端信任的证书，理由见下面第 3 段。
 #-----------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
+# 问网关：这个人该不该有 AI 功能。
+#
+#   0 不可见     —— 不注册加载项。【这是唯一能真正"看不见"的办法】：
+#                   Office.js 没有隐藏内置选项卡上按钮的能力，
+#                   任务窗格那边最多只能把按钮置灰。
+#   1 可见可使用 —— 正常装
+#   2 可见但置灰 —— 照常装，由任务窗格在运行时停用
+#
+# 【网关问不到时按 1 处理，照常安装】。这是个治理开关，不是安全闸：
+# 网关抖一下就让新员工装不上 AI，代价比"多装了一个用不了的按钮"大得多。
+# 而且真关掉的话，任务窗格在运行时还会再拦一道。
+#-----------------------------------------------------------------------------
+function Get-AiVisibility {
+    param([string]$Gateway, [string]$User)
+
+    $url = "$Gateway/api/ai-config?u=" + [uri]::EscapeDataString($User)
+    try {
+        # 用 ServerXMLHTTP：它有 setTimeouts，而 XMLHTTP 没有。
+        # 装机时卡在一个没响应的网关上是最差的体验。
+        $http = New-Object -ComObject MSXML2.ServerXMLHTTP.6.0
+        $http.setTimeouts(3000, 3000, 3000, 3000)
+        $http.open("GET", $url, $false)
+        $http.send()
+        if ($http.status -ne 200) { return 1 }
+
+        $cfg = $http.responseText | ConvertFrom-Json
+        $v = $cfg.visibility
+        if ($v -eq 0 -or $v -eq 1 -or $v -eq 2) { return [int]$v }
+        return 1
+    }
+    catch {
+        return 1
+    }
+}
+
 function Install-AI {
     Step "安装 AI 助手"
 
@@ -239,6 +275,23 @@ function Install-AI {
     }
     if ($gateway -notmatch '^https://') {
         Warn "网关用的是 http 而不是 https。Office 加载项通常要求 https，任务窗格可能加载不了。"
+    }
+
+    # --- 先问网关：这个人该不该有 AI 功能 ---
+    $vis = Get-AiVisibility -Gateway $gateway -User $env:USERNAME
+    if ($vis -eq 0) {
+        Say "   服务端已关闭 AI 功能（可见性 0），跳过安装。"
+
+        # 【已经装过就要卸掉】。改成"不可见"却留着上次装的加载项，
+        # 那个开关对老用户就是无效的——而老用户恰恰是最多的那批。
+        if (Test-AIInstalled) {
+            Say "   检测到之前装过，正在移除……"
+            Uninstall-AI | Out-Null
+        }
+        return $false
+    }
+    if ($vis -eq 2) {
+        Warn "服务端已把 AI 设为「可见但不可用」，按钮会装上，但点开会提示已停用。"
     }
 
     # 模板里的示例 GUID 没换过的话提醒一下——加载项的 Id 是全局唯一标识，
