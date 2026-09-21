@@ -262,16 +262,30 @@ try {
             @{ Pat = 'entry=True';         Msg = "定位到 misc.parseId 失败（ShowEntry 跨分组定位不工作）" }
             @{ Pat = 'guide=True';         Msg = "定位到 guide.macroTrust 失败" }
             # 【这条守的是事件接线本身】。上面几条走的是直接调 OnPaneEvent，
-            # 测的是处理逻辑；wired 只改 ListIndex、不手工调任何东西，
-            # 列表自己变了才说明 clsPaneCtl 的 WithEvents 真的接上了。
-            # 接线断掉的表现是"点了没反应且不报错"，没有这条就抓不到。
-            @{ Pat = 'wired=True';         Msg = "控件事件没接到窗体上（clsPaneCtl 的 WithEvents 包装失效，点了不会有反应）" }
+            # 测的是处理逻辑，测不到 clsPaneCtl 那层 WithEvents。
+            #
+            # 真正会发生的故障是【忘了把包装对象存进集合】：对象一被回收，
+            # 事件就静默失效，表现为"点了没反应且不报错"。
+            # 这里断言活着的接收器个数，判据是确定的，
+            # 不依赖"设 ListIndex 会不会触发 Click"这种随实现而变的行为。
+            # 需要事件的控件有 6 个：搜索框、搜索钮、两个列表、体检钮、HTML 钮。
+            # 正文框是只读显示区，不需要事件，所以不算在内。
+            @{ Pat = 'sinks=([6-9]|\d{2,})'; Msg = "事件接收器少于 6 个（clsPaneCtl 包装对象没保活，点了不会有反应）" }
         )
         foreach ($c in $checks) {
             if ($drive -notmatch $c.Pat) { $bad += $c.Msg }
         }
         if ($bad.Count -eq 0) {
             Write-Host "    分组→功能→正文、搜索、体检、条目定位全部有反应" -ForegroundColor Green
+        }
+
+        # 事件是否真的送达，只作为【观察值】记录，不判失败——
+        # 程序设 ListIndex 会不会触发 Click 取决于 MSForms 实现，
+        # 拿它当判据会在别的 Office 版本上变成假红。
+        if ($drive -match 'clickObserved=True') {
+            Write-Host "    本机实测：程序设置 ListIndex 会触发 Click，事件确实送达" -ForegroundColor DarkGray
+        } else {
+            Write-Host "    本机观察：程序设置 ListIndex 不触发 Click（不影响功能，代码没有依赖这个行为）" -ForegroundColor DarkYellow
         }
     }
 

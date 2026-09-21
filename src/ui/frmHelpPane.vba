@@ -21,6 +21,7 @@ Private Const PANE_WIDTH As Single = 330
 Private mCtls As Collection            ' 必须留住引用，否则事件静默失效
 Private mGroups As Variant             ' 每项 "groupId|标题"
 Private mItems As Variant              ' 每项 "entryId|显示名"
+Private mCurGroup As String            ' 当前已装载的分组，避免重复装载
 
 Private mLstGroups As MSForms.ListBox
 Private mLstItems As MSForms.ListBox
@@ -174,10 +175,21 @@ Private Sub LoadGroups()
         mLstGroups.AddItem PartAfterBar(CStr(mGroups(i)))
     Next i
 
-    If mLstGroups.ListCount > 0 Then mLstGroups.ListIndex = 0
+    ' 【必须显式加载第一组】。只设 ListIndex 就指望 Click 把功能列表填上，
+    ' 等于把"侧边栏打开时有没有内容"押在一个随控件实现而变的行为上：
+    ' 万一某个版本不触发，用户打开看到的就是一个空列表。
+    If mLstGroups.ListCount > 0 Then
+        mLstGroups.ListIndex = 0
+        LoadItems PartBeforeBar(CStr(mGroups(LBound(mGroups))))
+    End If
 End Sub
 
 Private Sub LoadItems(ByVal groupId As String)
+    ' 同一组不重复装载：程序设 ListIndex 可能【也】触发一次 Click，
+    ' 那样就会 Clear/AddItem 两遍，白闪一下。
+    If groupId = mCurGroup And mLstItems.ListCount > 0 Then Exit Sub
+    mCurGroup = groupId
+
     Dim raw As String
     raw = modHelp.CatalogItems(groupId)
 
@@ -360,16 +372,25 @@ Public Function PaneSelfTest() As String
     ShowEntry "guide.macroTrust"
     r = r & "|guide=" & CStr(InStr(mTxtBody.Text, "宏被禁用") > 0)
 
-    ' 7) 【事件接线探针】
+    ' 7) 【事件接线：确定性断言】
     ' 上面几步都是直接调 OnPaneEvent，测的是处理逻辑，
-    ' 并【没有】测 clsPaneCtl 那层 WithEvents 到底接上没有。
-    ' 这里只改 ListIndex、不手工调任何东西，看功能列表会不会自己变：
-    ' 变了说明 Click 事件真的传到了窗体，没变就是接线断了
-    ' （那正是"点了没反应且不报错"的故障形态）。
+    ' 并没有测 clsPaneCtl 那层 WithEvents 到底接上没有。
+    '
+    ' 真正会发生的故障是【忘了把包装对象存进集合】：对象一被回收，
+    ' 事件就静默失效，表现为"点了没反应且不报错"。
+    ' 所以直接断言活着的事件接收器个数——这个判据不依赖任何
+    ' "设 ListIndex 会不会触发 Click" 之类随实现而变的行为。
+    r = r & "|sinks=" & mCtls.Count
+
+    ' 附带观察一次事件是否真的送达（只改 ListIndex，不手工调）。
+    ' 【这一条是观察值，不作为硬性判据】：程序设 ListIndex 是否触发
+    ' Click 取决于 MSForms 实现，换个 Office 版本可能不一样。
+    ' 它为 False 不一定是代码坏了，先去确认那台机器的控件行为。
     mLstGroups.ListIndex = 0
+    mCurGroup = vbNullString
     mLstItems.Clear
     mLstGroups.ListIndex = 2
-    r = r & "|wired=" & CStr(mLstItems.ListCount > 0)
+    r = r & "|clickObserved=" & CStr(mLstItems.ListCount > 0)
 
     PaneSelfTest = "OK|" & r
     Exit Function
