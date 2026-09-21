@@ -18,8 +18,11 @@
 
     不需要管理员权限：只写 %APPDATA%、%LOCALAPPDATA% 和 HKCU。
 
+.PARAMETER Install
 .PARAMETER Uninstall
-    取消勾选并删除已安装的加载宏。
+    指定动作，跳过交互式选择。【供 IT 批量部署用】——
+    登录脚本、组策略里不能有交互，必须能直接指定装还是卸。
+    双击运行时两个都不给，脚本会先探测当前状态再询问。
 
 .PARAMETER NoTrustedLocation
     不添加受信任位置。
@@ -34,6 +37,7 @@
 #>
 [CmdletBinding()]
 param(
+    [switch]$Install,
     [switch]$Uninstall,
     [switch]$NoTrustedLocation,
     [string]$AddinName
@@ -139,9 +143,60 @@ function Good     ($m) { Write-Host "   [完成] $m" -ForegroundColor Green }
 function Warn     ($m) { Write-Host "   [注意] $m" -ForegroundColor Yellow }
 function Bad      ($m) { Write-Host "   [失败] $m" -ForegroundColor Red }
 
+#-----------------------------------------------------------------------------
+# 单一入口：不给参数时，先看当前装没装，再决定问什么。
+#
+# 为什么不做成"安装.bat + 卸载.bat"两个文件：对业务用户来说，
+# 桌面上多一个文件就多一次"我该点哪个"的犹豫。一个入口 + 按状态提示，
+# 该干什么是脚本自己判断出来的，用户只需要确认。
+#
+# 【-Install / -Uninstall 参数保留】：IT 批量部署走登录脚本或组策略时
+# 不能有交互，必须能指定动作直接跑。
+#-----------------------------------------------------------------------------
+function Get-InstalledAddins {
+    return @(Get-ChildItem -LiteralPath $AddInsDir -Filter "ExcelToolbox*.xlam" -ErrorAction SilentlyContinue)
+}
+
 Say "============================================"
-Say "  Excel 通用工具箱 - $(if ($Uninstall) { '卸载' } else { '安装' })"
+Say "  Excel 通用工具箱"
 Say "============================================"
+
+if (-not $Uninstall -and -not $Install) {
+    $current = Get-InstalledAddins
+
+    Say ""
+    if ($current.Count -eq 0) {
+        Say "当前状态：尚未安装"
+        Say ""
+        Say "  [1] 安装工具箱   （直接回车即可）"
+        Say "  [0] 退出"
+        Say ""
+        $choice = Read-Host "请输入数字后回车"
+        if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
+    }
+    else {
+        Say "当前状态：已安装（$(($current.Name) -join ', ')）"
+        Say ""
+        Say "  [1] 重新安装 / 升级到本目录里的版本"
+        Say "  [2] 卸载工具箱"
+        Say "  [0] 退出"
+        Say ""
+        $choice = Read-Host "请输入数字后回车"
+    }
+
+    switch ($choice.Trim()) {
+        "1"     { $Install = $true }
+        "2"     {
+            if ($current.Count -eq 0) { Say ""; Say "还没有安装，无需卸载。"; exit 0 }
+            $Uninstall = $true
+        }
+        "0"     { Say ""; Say "已取消，未做任何改动。"; exit 0 }
+        default { Say ""; Bad "无法识别的输入「$choice」，未做任何改动。"; exit 1 }
+    }
+}
+
+Say ""
+Say "—— 开始$(if ($Uninstall) { '卸载' } else { '安装' }) ——"
 
 #-----------------------------------------------------------------------------
 # 找到要安装的 .xlam：优先用参数指定的，否则取脚本同目录下的那一个

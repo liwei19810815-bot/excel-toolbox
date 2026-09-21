@@ -1,20 +1,21 @@
 Excel 通用工具箱 —— 安装说明
 ============================================
 
-【怎么装】
+【怎么用】
 
-  双击「安装工具箱.bat」，等它跑完，然后打开 Excel。
-  功能区上会多出一个「工具箱」选项卡。
+  双击「Excel工具箱.bat」。
 
-  安装前请先关闭所有 Excel 窗口。
-  如果忘了关也没关系，程序会等你关，不会替你关（以免弄丢没保存的内容）。
+  它会先看你装没装，然后问你要做什么：
+
+      没装过  →  直接回车就开始安装
+      装过了  →  可以选 重新安装 / 卸载 / 退出
+
+  装和卸都是这一个文件，不用找第二个。
+
+  开始之前请先关闭所有 Excel 窗口。
+  忘了关也没关系，程序会等你关，不会替你关（以免弄丢没保存的内容）。
 
   不需要管理员权限。
-
-
-【怎么卸】
-
-  双击「卸载工具箱.bat」。
 
 
 【装完没看到「工具箱」选项卡？】
@@ -40,17 +41,20 @@ Excel 通用工具箱 —— 安装说明
      不加的话，每次打开 Excel 都会弹一次宏安全警告。
      这一步会改 Excel 的安全设置，程序运行时会明确告诉你。
 
-     如果不想改安全设置，用命令行加 -NoTrustedLocation 参数运行即可；
-     代价是每次启动会看到宏警告。
-
   除此之外不动任何系统设置，不写系统目录，不需要联网。
+
+  选"卸载"时，上面三项会全部还原，不留痕迹。
 
 
 【给 IT / 批量部署】
 
-  几十台机器不建议一台台双击。受信任位置那一项应该用组策略统一下发，
-  安装本身可以放进登录脚本：
+  几十台机器不建议一台台双击。交互式菜单可以用参数跳过：
 
-    powershell -ExecutionPolicy Bypass -File Install-Toolbox.ps1 -NoTrustedLocation
+    powershell -ExecutionPolicy Bypass -File Install-Toolbox.ps1 -Install -NoTrustedLocation
+    powershell -ExecutionPolicy Bypass -File Install-Toolbox.ps1 -Uninstall
+
+  -NoTrustedLocation 表示不改 Excel 安全设置。
+  批量部署时建议加上它，受信任位置改由组策略统一下发——
+  既好管理，将来信息安全审计时也说得清。
 
   详见仓库里的 docs\部署与自动更新.md。
