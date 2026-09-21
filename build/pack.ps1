@@ -419,8 +419,14 @@ try {
         # Compress-Archive 写进去的是 \。直接比字符串会把每一个子目录
         # 里的文件都判成"少了"——一条永远为真的告警等于没有告警。
         $inZip = @($zf.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+        # 【双向比对】。只查"该有的都在"是不够的：多出来的条目同样是问题
+        # （上一次的残留被并进来、通配符匹配到了不该进包的东西），
+        # 而多出来的文件一样会跟着发到用户手里。
         foreach ($e in $expected) {
             if ($inZip -notcontains $e) { $zipBad += "少了 $e" }
+        }
+        foreach ($e in $inZip) {
+            if ($expected -notcontains $e) { $zipBad += "多了不该有的 $e" }
         }
         # 条目大小为 0 而源文件不是 0，说明内容没写进去
         foreach ($entry in $zf.Entries) {
@@ -434,10 +440,21 @@ try {
 catch { $zipBad += "zip 打不开：$($_.Exception.Message)" }
 
 if ($zipBad.Count -gt 0) {
-    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
     Write-Host ""
-    Write-Host "生成的 zip 核对不过，已删除，不要发：" -ForegroundColor Red
+    Write-Host "生成的 zip 核对不过，不要发：" -ForegroundColor Red
     foreach ($b in $zipBad) { Write-Host "  - $b" -ForegroundColor Red }
+
+    # 【删不掉一定要喊出来】。静默删除失败的话，一个坏包会原封不动
+    # 躺在 dist\ 里，而报错早就滚出屏幕了——下一个人看到的就是
+    # "有个 zip，看起来能发"。
+    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $zipPath) {
+        Write-Host ""
+        Write-Host "！！这个坏包没能删掉，请手工删除，【绝对不要分发】：" -ForegroundColor Red
+        Write-Host "    $zipPath" -ForegroundColor Red
+    } else {
+        Write-Host "已删除该 zip。" -ForegroundColor DarkGray
+    }
     exit 1
 }
 Write-Ok "zip 核对通过（$($expected.Count) 个文件都在，内容非空）"

@@ -120,17 +120,34 @@ try {
             if ($sc -like "*ribbon=True") { $ok = $true; break }
         }
         catch {
-            # 【只对"应用程序正忙"重试，别的异常立刻失败】。
+            # 【只对"服务器忙、稍后再试"重试，别的异常立刻失败】。
             # 无差别重试会降低敏感度：一个真实故障如果在这 24 秒里
             # 偶然自愈，测试就变绿了——等于用等待把问题盖住。
-            # RPC_E_CALL_REJECTED (0x8001010A) 和 RPC_E_SERVERCALL_RETRYLATER
-            # (0x8001010A/0x80010100 系列) 才是"等一下就好"的那类。
+            #
+            # 这三个才是 Office 自动化里"等一下就好"的那一族：
+            #     0x80010001 RPC_E_CALL_REJECTED
+            #     0x8001010A RPC_E_SERVERCALL_RETRYLATER
+            #     0x8001010B RPC_E_SERVERCALL_REJECTED
+            # 【不要把 0x8001010D 算进来】：那是
+            # RPC_E_CANTCALLOUT_ININPUTSYNCCALL，属于调用上下文错误，
+            # 不是瞬时忙——重试它只会把一个真错误拖够 24 秒再报。
+            #
+            # 【比较可以直接用十六进制字面量】：PowerShell 把 0x8001010A
+            # 解析成 Int32 -2147417846，和 COM 异常里带符号的 HResult
+            # 正好一致。反过来写成 [uint32]$hr 才会炸（负数转不过去）。
+            $retryable = @(0x80010001, 0x8001010A, 0x8001010B)
+
             $hr = 0
             try { $hr = $_.Exception.InnerException.HResult } catch {}
-            if ($hr -eq 0) { try { $hr = $_.Exception.HResult } catch {} }
+            if (-not $hr) { try { $hr = $_.Exception.HResult } catch {} }
 
-            $busy = ($hr -eq 0x8001010A) -or ($hr -eq 0x8001010D) -or
-                    ($_.Exception.Message -like "*0x8001010A*")
+            $busy = ($retryable -contains $hr)
+            if (-not $busy) {
+                # HResult 取不到时退回看文本（本地化消息里通常带着十六进制码）
+                foreach ($code in @("0x80010001", "0x8001010A", "0x8001010B")) {
+                    if ($_.Exception.Message -like "*$code*") { $busy = $true; break }
+                }
+            }
             if (-not $busy) { throw }      # 不是"忙"，就是真错，交给外层 catch
 
             $lastErr = $_.Exception.Message
