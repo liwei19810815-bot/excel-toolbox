@@ -165,7 +165,7 @@ VBE 的「编译 VBAProject」（命令 ID 578），而且要先激活加载宏�
 `build/` 和 `tests/` 下的脚本一律存 UTF-8 **with BOM**。
 
 **6. 不要用 `StrConv(s, vbNarrow)` / `vbWide` 做全角半角转换。** 它依赖操作系统的 DBCS 支持，
-在相当多的环境里对**任意输入**都抛运行时错误 5（本机 Excel 2016 64 位中文环境实测如此，
+在相当多的环境里对**任意输入**都抛运行时错误 5（在 64 位中文 Windows 上实测如此，
 连纯 ASCII 都抛），而且只在运行到那一行才炸。一律用 `modStr.ToHalfWidth` / `ToFullWidth`
 的显式码位映射。顺带两个 VBA 陷阱：十六进制字面量超过 `&H7FFF` 会被当成负 Integer，
 必须写 `&HFF5E&`；`AscW` 返回带符号 Integer，码位大于 32767 时是负数，要补回 65536。
@@ -210,13 +210,17 @@ Office 对象模型隐式成员重名的）都要避开。
 
 ### 兼容性
 
-实测过的只有 **Excel 2016 (16.0) 64 位 / Windows 11 / 中文**。
-完整的版本下限依据、WPS 实测结论、以及 WPS 劫持 Excel COM 注册的应对，
-见 [docs/兼容性.md](docs/兼容性.md)。
+实测过的是 **Office LTSC 2024（16.0.17932）64 位 / Windows 11 / 中文**。
+完整的版本下限依据、Excel 2021 需要额外验什么、WPS 实测结论、
+以及 WPS 劫持 Excel COM 注册的应对，见 [docs/兼容性.md](docs/兼容性.md)。
 
 要点：
 
 - **下限是 Excel 2010**（`customUI14` 命名空间决定），2007 不支持
+- **Excel 2021 未实测**。它和 2024 同为 16.0，代码层面无差异；
+  唯一需要在 2021 上跑一次的是 `tests/check-imagemso.ps1`——
+  功能区图标集在不同版本间**可能**不同，而图标失效是静默的，
+  所有测试都不会因此变红
 - **WPS 本机实测不可用**：`VBProject` 返回 Null、`Application.Run` 失败——
   这台机器的 WPS 没有可用的 VBA 引擎，与本工具箱实现无关
 - **装了 WPS 会劫持 Excel 的 COM 注册**，并且 WPS **自称 "Microsoft Excel"**。
