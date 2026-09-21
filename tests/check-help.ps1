@@ -62,10 +62,15 @@ $missing = @($regIds | Where-Object { $helpIds -notcontains $_ })
 $orphan  = @($helpIds | Where-Object { $regIds -notcontains $_ })
 $dupe    = @($helpIds | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
 
+# 注册表里重复注册同一个 actionId 也要抓：后注册的会静默覆盖先注册的，
+# 两条定义只有一条生效，而 Ribbon 一致性断言照样通过
+$regDupe = @($regIds | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+
 $errors = @()
 foreach ($m in $missing) { $errors += "缺少帮助条目：$m（在 src\help\help.md 里加一节 ## $m）" }
 foreach ($o in $orphan)  { $errors += "帮助条目对应的命令已不存在：$o" }
 foreach ($d in $dupe)    { $errors += "帮助条目重复：$d" }
+foreach ($d in $regDupe) { $errors += "命令重复注册：$d（后一条会静默覆盖前一条）" }
 
 if ($errors.Count -gt 0) {
     Write-Host "静态检查未通过：" -ForegroundColor Red
@@ -138,6 +143,50 @@ try {
         Write-Host "    无关词返回了 $($none.Count) 条，应该是 0" -ForegroundColor Red
         $bad += "无关词没有返回空结果"
     }
+
+    # 【标题命中不能屏蔽正文命中】。
+    # 第一版的两轮匹配是"第一轮有结果就不跑第二轮"，
+    # 搜"重复"时标题里带"重复"的两条会把正文里讲"重复"的
+    # 「提取唯一值」整个挡掉——而那很可能正是用户要找的。
+    $dupHits = @(($xl.Run("'$OutputName'!Toolbox_ResolveHelp", "重复") -split "`n") | Where-Object { $_ })
+    if ($dupHits -contains "data.extractUnique") {
+        Write-Host "    OK    「重复」同时命中标题与正文（$($dupHits.Count) 条）" -ForegroundColor DarkGreen
+    } else {
+        Write-Host "    「重复」漏掉了 data.extractUnique，实际：$($dupHits -join ', ')" -ForegroundColor Red
+        $bad += "标题命中屏蔽了正文命中"
+    }
+
+    #-------------------------------------------------------------------------
+    # 【搜索绝不能直接执行命令】
+    #
+    # 注册表里有 data.deleteDuplicates、file.batchRename、formula.breakLinks
+    # 这类会改数据甚至改磁盘文件的命令。用户在搜索框里打几个字按回车，
+    # 数据就被改了——那不是"省一次点击"，是从输入框静默触发破坏性操作。
+    # 这条断言守住"搜索只负责找，不负责做"。
+    #-------------------------------------------------------------------------
+    Write-Host "==> 搜索不得执行命令" -ForegroundColor Cyan
+    $probe = $xl.Workbooks.Add(-4167)
+    $pw = $probe.Worksheets.Item(1)
+    $null = $pw.Cells.Clear()
+    $pw.Range("A1").Value2 = "x"
+    $pw.Range("A2").Value2 = "x"
+    $null = $pw.Activate()
+    $null = $pw.Range("A1:A2").Select()
+
+    # 这个词应该只命中「删除重复值」一条——正是最危险的单命中场景
+    $null = $xl.Run("'$OutputName'!Toolbox_SearchHelp", "删除重复值")
+    Start-Sleep -Milliseconds 300
+
+    $a1 = "$($pw.Range('A1').Value2)"
+    $a2 = "$($pw.Range('A2').Value2)"
+    if ($a1 -eq "x" -and $a2 -eq "x") {
+        Write-Host "    OK    搜索「删除重复值」没有动数据" -ForegroundColor DarkGreen
+    } else {
+        Write-Host "    搜索执行了命令！A1=[$a1] A2=[$a2]（原本都是 x）" -ForegroundColor Red
+        $bad += "搜索直接执行了破坏性命令"
+    }
+    $xl.DisplayAlerts = $false
+    $probe.Close($false)
 }
 catch {
     Write-Host "检查过程异常：$($_.Exception.Message)" -ForegroundColor Red

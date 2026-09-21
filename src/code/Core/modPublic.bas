@@ -87,6 +87,14 @@ Public Function Toolbox_ResolveHelp(ByVal query As String) As String
     Toolbox_ResolveHelp = modHelp.Resolve(query)
 End Function
 
+' 走【真实的搜索路径】（功能区搜索框调的就是它）。
+' 测试用它断言"搜索只负责找，不负责做"——这一条必须走真路径验证，
+' 用只读的 Resolve 去验等于什么都没验。
+' 静默模式下 modHelp 不会真的弹浏览器。
+Public Function Toolbox_SearchHelp(ByVal query As String) As String
+    Toolbox_SearchHelp = modHelp.Search(query)
+End Function
+
 '------------------------------------------------------------------------------
 ' 检查一批 imageMso 在【当前这台机器的 Excel】上是否存在。
 ' 入参用 | 分隔，返回【不存在的那些】，同样用 | 分隔；全部存在则返回空串。

@@ -212,10 +212,34 @@ function Install-AI {
 
     $gatewayFile = Join-Path $AIDir "gateway.txt"
     if (-not (Test-Path $gatewayFile)) { Bad "缺少 ai\gateway.txt（内网网关地址）。"; return $false }
-    $gateway = (Get-Content -LiteralPath $gatewayFile -Raw).Trim()
+    $gateway = (Get-Content -LiteralPath $gatewayFile -Raw).Trim().TrimEnd('/')
     if ([string]::IsNullOrWhiteSpace($gateway)) { Bad "ai\gateway.txt 是空的。"; return $false }
 
+    # 【网关地址必须校验】。它会被原样拼进 manifest 的 XML，
+    # 地址里有 & 或 < 就会让整个 manifest 变成非法 XML，
+    # 而 Office 遇到非法 manifest 是【静默不加载】——
+    # 用户只看到"按钮没出现"，没有任何报错可查。宁可现在就拦下来。
+    if ($gateway -notmatch '^https?://[^\s<>&"'']+$') {
+        Bad "ai\gateway.txt 的地址不合法：$gateway"
+        Say  "     应形如 https://192.168.1.50:8443，且不能含空格或 < > & 等字符。"
+        return $false
+    }
+    if ($gateway -notmatch '^https://') {
+        Warn "网关用的是 http 而不是 https。Office 加载项通常要求 https，任务窗格可能加载不了。"
+    }
+
+    # 模板里的示例 GUID 没换过的话提醒一下——加载项的 Id 是全局唯一标识，
+    # 两个组织用同一个 Id 会互相覆盖，而这种冲突极难排查
+    $tplText = [IO.File]::ReadAllText($tpl, [Text.UTF8Encoding]::new($false))
+    if ($tplText -match '7b2e4c91-6a38-4d5f-9e10-3c8a5f2d6b47') {
+        Warn "manifest 模板里还是示例 GUID。正式分发前请换成你自己的（见 ai\README.txt）。"
+    }
+
     if (-not (Test-Path $AITargetDir)) { $null = New-Item -ItemType Directory -Path $AITargetDir -Force }
+
+    # 失败时要知道回滚到什么状态
+    $manifest = Join-Path $AITargetDir "manifest.xml"
+    $manifestExistedBefore = Test-Path -LiteralPath $manifest
 
     # --- 1. 生成专属 manifest ---
     #
@@ -225,21 +249,45 @@ function Install-AI {
     $user = $env:USERNAME
     $userEnc = [uri]::EscapeDataString($user)
 
-    $xml = [IO.File]::ReadAllText($tpl, [Text.UTF8Encoding]::new($false))
-    $xml = $xml.Replace("{{USER}}", $userEnc).Replace("{{GATEWAY}}", $gateway.TrimEnd('/'))
+    try {
+        $xml = $tplText.Replace("{{USER}}", $userEnc).Replace("{{GATEWAY}}", $gateway)
 
-    $manifest = Join-Path $AITargetDir "manifest.xml"
-    [IO.File]::WriteAllText($manifest, $xml, [Text.UTF8Encoding]::new($false))
-    Good "manifest 已生成（用户：$user）"
+        # 替换完必须还是合法 XML。这一步是最后一道闸：
+        # 上面校验的是网关地址，用户名走了 URL 编码，理论上都安全，
+        # 但模板本身也可能被改坏——与其让 Office 静默不加载，不如这里就失败。
+        [void]([xml]$xml)
+
+        [IO.File]::WriteAllText($manifest, $xml, [Text.UTF8Encoding]::new($false))
+        Good "manifest 已生成（用户：$user）"
+    }
+    catch {
+        Bad "manifest 生成失败：$($_.Exception.Message)"
+        if (-not $manifestExistedBefore) {
+            Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
+        }
+        return $false
+    }
 
     # --- 2. 内网 CA ---
+    #
+    # 【装不上就整体失败】。原先只是告警然后继续注册，结果是
+    # "CA 没装但加载项已注册"——用户打开 Excel 看到按钮，一点就是证书错误，
+    # 比干脆没装还难排查。自签网关下 CA 是硬依赖，不该半装。
     $ca = Join-Path $AIDir "ca.crt"
     if (Test-Path $ca) {
         Say "   即将把内网 CA 证书装入【当前用户】的受信任根存储。"
         Say "   这是为了让 Excel 信任内网的 https 地址；不装的话任务窗格会因证书错误打不开。"
         $r = & certutil -user -addstore Root "$ca" 2>&1
-        if ($LASTEXITCODE -eq 0) { Good "CA 证书已安装" }
-        else { Warn "CA 证书安装失败，任务窗格可能因证书错误打不开：$r" }
+        if ($LASTEXITCODE -eq 0) {
+            Good "CA 证书已安装"
+        } else {
+            Bad "CA 证书安装失败：$r"
+            Say  "     已回滚，未注册 AI 助手（避免留下「按钮能点但打不开」的状态）。"
+            if (-not $manifestExistedBefore) {
+                Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
+            }
+            return $false
+        }
     }
 
     # --- 3. 让 Excel 认识它 ---
@@ -249,11 +297,16 @@ function Install-AI {
                          -PropertyType String -Force | Out-Null
 
         $back = (Get-ItemProperty -Path $WefDeveloper -Name $AITargetDir -ErrorAction SilentlyContinue).$AITargetDir
-        if ($back -eq $AITargetDir) { Good "已注册到 Excel" }
-        else { Warn "注册表写入后回读不一致，AI 助手可能不会出现" }
+        if ($back -ne $AITargetDir) { throw "注册表写入后回读不一致" }
+        Good "已注册到 Excel"
     }
     catch {
         Bad "注册失败：$($_.Exception.Message)"
+        # 注册不上的话 manifest 留着也没用，回滚掉，别留半截状态
+        if (-not $manifestExistedBefore) {
+            Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
+            Say "     已回滚生成的 manifest。"
+        }
         return $false
     }
 
@@ -285,12 +338,17 @@ function Uninstall-AI {
     # 卸载一个加载项就把公司的根证书删掉，代价远大于收益。
     Say "   注：内网 CA 证书未删除（可能有其他内网系统在用）。"
 
-    # Office 会缓存加载项，不清的话按钮可能还在但打不开
-    $wefCache = Join-Path $env:LOCALAPPDATA "Microsoft\Office\16.0\Wef"
-    if (Test-Path $wefCache) {
-        Remove-Item "$wefCache\*" -Recurse -Force -ErrorAction SilentlyContinue
-        Good "已清理 Office 加载项缓存"
-    }
+    # 【Office 的 WEF 缓存目录也不动】。
+    #
+    # 这里曾经写的是 Remove-Item "%LOCALAPPDATA%\Microsoft\Office\16.0\Wef\*"，
+    # 那是【清空所有 Office.js 加载项的缓存】——包括别的公司、别的项目装的，
+    # 和我们毫无关系。为了清自己的残留去删别人的东西，代价完全不成比例。
+    #
+    # 而且本来也不需要：加载项能不能出现取决于上面那条 WEF\Developer 注册项，
+    # 它已经删了，Excel 就不会再加载我们的加载项。缓存里剩下的只是文件。
+    #
+    # 万一真遇到"按钮还在但打不开"的残留，让用户手工清一次即可——
+    # 那是极少数情况，不值得让每一次卸载都冒误删别人缓存的风险。
 }
 
 Say "============================================"

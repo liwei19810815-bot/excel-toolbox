@@ -57,11 +57,18 @@ End Function
 '------------------------------------------------------------------------------
 ' 「我要做什么」搜索。功能区搜索框调用。
 '
-' 匹配顺序：先精确匹配 actionId，再匹配标题，最后匹配关键词和正文。
-' 命中一条就直接执行那条命令；命中多条就打开筛选过的帮助页让用户挑。
+' 把命中的命令用帮助页展示出来，让用户看清楚再去点对应的按钮。
 '
-' 【为什么命中一条要直接执行而不是显示帮助】：用户在搜索框里打"求和是0"，
-' 他想要的是把问题解决掉，不是读一篇文章。多一次点击就多一次放弃的机会。
+' 【为什么不"命中一条就直接执行"】：
+' 第一版就是那么做的，理由是"用户打『求和是0』是想解决问题，
+' 少一次点击就少一次放弃的机会"。这个理由本身没错，但代价没算清楚——
+' 注册表里有 data.deleteDuplicates、data.deleteEmptyRows、file.batchRename、
+' formula.breakLinks 这类会改数据甚至改磁盘文件的命令。
+' 用户在搜索框里打几个字、按回车，然后数据就被改了，
+' 这不是"省一次点击"，是【从一个输入框里静默触发了破坏性操作】。
+'
+' 搜索框的职责是"帮你找到功能"，不是"替你决定执行"。
+' 省下的那一次点击，远不值得冒一次意外删除的风险。
 '------------------------------------------------------------------------------
 Public Function Search(ByVal query As String) As String
     Dim q As String
@@ -80,20 +87,20 @@ Public Function Search(ByVal query As String) As String
         Exit Function
     End If
 
-    If hits.Count = 1 Then
-        ' 直接执行。RunAction 会自己处理前置校验、确认和撤销。
-        modAction.RunAction CStr(hits(1))
-        Search = vbNullString
-        Exit Function
-    End If
-
-    ' 多条命中：打开帮助页，只显示这几条
     Dim path As String
     path = BuildHtmlForSet(hits, q)
     If Len(path) = 0 Then
-        Search = "找到 " & hits.Count & " 个相关功能，但帮助内容不可用。"
+        ' 帮助内容不可用时至少把功能名告诉用户，别让他一无所获
+        Dim names As String, i As Long
+        For i = 1 To hits.Count
+            If Len(names) > 0 Then names = names & "、"
+            names = names & modAction.ActionLabel(CStr(hits(i)))
+        Next i
+        Search = "找到 " & hits.Count & " 个相关功能：" & vbCrLf & vbCrLf & names & _
+                 vbCrLf & vbCrLf & "（帮助内容不可用，请在功能区里找上述按钮）"
         Exit Function
     End If
+
     OpenInBrowser path
     Search = vbNullString
 End Function
@@ -175,33 +182,46 @@ End Function
 '------------------------------------------------------------------------------
 ' 找出和查询词相关的 actionId。
 '------------------------------------------------------------------------------
+'------------------------------------------------------------------------------
+' 找出和查询词相关的 actionId，按相关度从高到低。
+'
+' 【不能分成"第一轮有结果就不跑第二轮"】。第一版是那么写的，
+' 后果是标题命中会把正文命中整个屏蔽掉：
+' 搜"重复"命中了标题里带"重复"的两条，于是正文里讲"重复"的
+' 「提取唯一值」就再也出不来了——而那很可能正是用户要找的。
+'
+' 现在一轮扫完全部来源，按命中位置打分，高分在前、低分在后，
+' 不丢任何一条。
+'------------------------------------------------------------------------------
 Private Function FindMatches(ByVal q As String) As Collection
-    Dim result As New Collection
-    Set FindMatches = result
+    Dim strong As New Collection      ' actionId / 标题命中
+    Dim weak As New Collection        ' 关键词 / 正文命中
 
-    Dim ids() As String, i As Long
+    Dim ids() As String, i As Long, id As String
     ids = Split(modAction.AllActionIds(), vbLf)
 
-    ' 第一轮：actionId 或标题精确/包含匹配，优先级最高
     For i = LBound(ids) To UBound(ids)
-        If Len(ids(i)) > 0 Then
-            If InStr(1, ids(i), q, vbTextCompare) > 0 _
-               Or InStr(1, modAction.ActionLabel(ids(i)), q, vbTextCompare) > 0 Then
-                result.Add ids(i)
+        id = ids(i)
+        If Len(id) > 0 Then
+            If InStr(1, id, q, vbTextCompare) > 0 _
+               Or InStr(1, modAction.ActionLabel(id), q, vbTextCompare) > 0 Then
+                strong.Add id
+            ElseIf InStr(1, KeywordsOf(id), q, vbTextCompare) > 0 _
+                Or InStr(1, BodyOf(id), q, vbTextCompare) > 0 Then
+                weak.Add id
             End If
         End If
     Next i
-    If result.Count > 0 Then Exit Function
 
-    ' 第二轮：关键词与正文
-    For i = LBound(ids) To UBound(ids)
-        If Len(ids(i)) > 0 Then
-            If InStr(1, KeywordsOf(ids(i)), q, vbTextCompare) > 0 _
-               Or InStr(1, BodyOf(ids(i)), q, vbTextCompare) > 0 Then
-                result.Add ids(i)
-            End If
-        End If
+    Dim result As New Collection
+    For i = 1 To strong.Count
+        result.Add strong(i)
     Next i
+    For i = 1 To weak.Count
+        result.Add weak(i)
+    Next i
+
+    Set FindMatches = result
 End Function
 
 '==============================================================================
@@ -348,6 +368,9 @@ Private Function HtmlTail() As String
                "</body></html>"
 End Function
 
+' 【& 必须第一个换】，否则后面换出来的 &lt; 会被再换成 &amp;lt;。
+' 单引号也一起转：当前 HTML 属性都用双引号，单引号不会突破边界，
+' 但帮助正文来自可编辑的 help.md，统一转掉成本为零，不留口子。
 Private Function Esc(ByVal s As String) As String
     Dim t As String
     t = s
@@ -355,6 +378,7 @@ Private Function Esc(ByVal s As String) As String
     t = Replace(t, "<", "&lt;")
     t = Replace(t, ">", "&gt;")
     t = Replace(t, """", "&quot;")
+    t = Replace(t, "'", "&#39;")
     Esc = t
 End Function
 
@@ -395,6 +419,10 @@ End Sub
 ' ThisWorkbook.FollowHyperlink 是 Excel 自己的 API，不在那类拦截规则里。
 '------------------------------------------------------------------------------
 Private Sub OpenInBrowser(ByVal path As String)
+    ' 静默模式下只生成文件不打开：测试里弹一个浏览器窗口出来，
+    ' 和弹 MsgBox 一样是打扰，只是不会把测试挂死而已。
+    If modAction.IsSilent() Then Exit Sub
+
     On Error Resume Next
     ThisWorkbook.FollowHyperlink path
     Err.Clear

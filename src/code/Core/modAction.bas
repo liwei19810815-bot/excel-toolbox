@@ -34,6 +34,13 @@ Public Function LastMessage() As String
     LastMessage = mLastMessage
 End Function
 
+' 静默模式下不许有任何"会打扰人"的副作用。modHelp 用它来决定
+' 要不要真的弹浏览器——测试里弹一个浏览器窗口出来，
+' 和弹一个 MsgBox 一样属于打扰，只是不会挂死而已。
+Public Function IsSilent() As Boolean
+    IsSilent = mSilent
+End Function
+
 Private Sub Notify(ByVal msg As String, ByVal style As VbMsgBoxStyle)
     mLastMessage = msg
     If mSilent Then Exit Sub
