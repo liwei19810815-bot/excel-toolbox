@@ -53,6 +53,29 @@ Public Sub BindText(ByVal ctl As Object, ByVal pane As Object, ByVal tagName As 
     mTag = tagName
 End Sub
 
+'------------------------------------------------------------------------------
+' 自述：绑的是哪个控件、挂的什么 tag。
+'
+' 【给测试用】。只数包装对象的个数是不够的——数量对了，仍然可能
+' 绑错了控件、挂错了 tag，或者某一个控件根本没绑上。
+' 那几种情况的表现都是"点某个按钮没反应"，而且不报错。
+' 这里把绑定关系吐出来，测试逐条比对。
+'------------------------------------------------------------------------------
+Public Function Describe() As String
+    On Error Resume Next
+    If Not Lst Is Nothing Then
+        Describe = mTag & ":" & Lst.Name & ":list"
+    ElseIf Not Btn Is Nothing Then
+        Describe = mTag & ":" & Btn.Name & ":button"
+    ElseIf Not Txt Is Nothing Then
+        Describe = mTag & ":" & Txt.Name & ":text"
+    Else
+        Describe = mTag & ":(未绑定):none"
+    End If
+    Err.Clear
+    On Error GoTo 0
+End Function
+
 Private Sub Lst_Click()
     If mPane Is Nothing Then Exit Sub
     mPane.OnPaneEvent mTag

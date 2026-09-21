@@ -279,6 +279,25 @@ try {
             Write-Host "    分组→功能→正文、搜索、体检、条目定位全部有反应" -ForegroundColor Green
         }
 
+        # 【逐条比对绑定关系】。只数个数抓不到这几种：绑错控件、挂错 tag、
+        # 某个控件压根没绑上。它们的表现都是"点某个按钮没反应"且不报错。
+        $expectedBinds = @(
+            'search:txtSearch:text'
+            'search:btnSearch:button'
+            'groups:lstGroups:list'
+            'items:lstItems:list'
+            'env:btnEnv:button'
+            'html:btnHtml:button'
+        )
+        foreach ($b in $expectedBinds) {
+            if ($drive -notmatch [regex]::Escape($b)) {
+                $bad += "事件绑定缺失或绑错：应有 $b"
+            }
+        }
+        if ($bad.Count -eq 0) {
+            Write-Host "    6 个控件的事件绑定逐条核对无误" -ForegroundColor Green
+        }
+
         # 事件是否真的送达，只作为【观察值】记录，不判失败——
         # 程序设 ListIndex 会不会触发 Click 取决于 MSForms 实现，
         # 拿它当判据会在别的 Office 版本上变成假红。
@@ -286,6 +305,11 @@ try {
             Write-Host "    本机实测：程序设置 ListIndex 会触发 Click，事件确实送达" -ForegroundColor DarkGray
         } else {
             Write-Host "    本机观察：程序设置 ListIndex 不触发 Click（不影响功能，代码没有依赖这个行为）" -ForegroundColor DarkYellow
+        }
+        if ($drive -match 'btnObserved=True') {
+            Write-Host "    本机实测：从控件侧触发按钮 Click，处理逻辑确实被调用" -ForegroundColor DarkGray
+        } else {
+            Write-Host "    本机观察：设置 CommandButton.Value 不触发 Click（代码没有依赖这个行为）" -ForegroundColor DarkYellow
         }
     }
 

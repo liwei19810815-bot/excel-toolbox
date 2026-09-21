@@ -167,6 +167,7 @@ End Sub
 ' 数据装填 —— 内容全部来自 modHelp
 '==============================================================================
 Private Sub LoadGroups()
+    mCurGroup = vbNullString          ' 重新装载分组时清掉缓存，别沿用上一轮的
     mGroups = Split(modHelp.CatalogGroups(), vbLf)
 
     mLstGroups.Clear
@@ -381,6 +382,23 @@ Public Function PaneSelfTest() As String
     ' 所以直接断言活着的事件接收器个数——这个判据不依赖任何
     ' "设 ListIndex 会不会触发 Click" 之类随实现而变的行为。
     r = r & "|sinks=" & mCtls.Count
+
+    ' 光数个数还不够：个数对了仍可能绑错控件、挂错 tag，或某个控件压根没绑。
+    ' 把绑定关系逐条吐出来，让测试比对"哪个 tag 绑在哪个控件上"。
+    Dim k As Long, binds As String
+    For k = 1 To mCtls.Count
+        If Len(binds) > 0 Then binds = binds & ","
+        binds = binds & mCtls(k).Describe()
+    Next k
+    r = r & "|binds=" & binds
+
+    ' 真的从控件侧触发一次按钮事件（不是直接调 OnPaneEvent），
+    ' 确认"点按钮 → 处理逻辑"这条链是通的。
+    ' 和 clickObserved 一样属于观察值：CommandButton.Value = True 是否
+    ' 触发 Click 同样取决于 MSForms 实现，因此不作为硬性判据。
+    mTxtBody.Text = ""
+    Me.Controls("btnEnv").Value = True
+    r = r & "|btnObserved=" & CStr(InStr(mTxtBody.Text, "环境检查结果") > 0)
 
     ' 附带观察一次事件是否真的送达（只改 ListIndex，不手工调）。
     ' 【这一条是观察值，不作为硬性判据】：程序设 ListIndex 是否触发
