@@ -48,6 +48,19 @@ $CacheDir     = Join-Path $env:LOCALAPPDATA "ExcelToolbox"
 $AITargetDir  = Join-Path $CacheDir "ai"
 $WefDeveloper = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
 $WefCache     = Join-Path $env:LOCALAPPDATA "Microsoft\Office\16.0\Wef"
+$TelemetryDir = Join-Path $CacheDir "telemetry"
+
+# 【缓存目录存在 ≠ 装过工具箱】。%LOCALAPPDATA%\ExcelToolbox 被三样东西共用：
+# 自动更新的载荷缓存、AI 的 ai\、以及【加载宏运行时写的 telemetry\ 缓冲】。
+# 遥测缓冲只要有人用过工具箱就会有，跟装没装没关系——
+# 拿"目录存在"当判据，会把只跑过遥测套件的机器误判成"已安装"，
+# 于是本脚本拒绝运行（实测就是这么被 run-all 卡住的）。
+# 判据只认【telemetry 以外的内容】。
+function Test-InstallCachePresent {
+    if (-not (Test-Path -LiteralPath $CacheDir)) { return $false }
+    return @(Get-ChildItem -LiteralPath $CacheDir -Force -ErrorAction SilentlyContinue |
+             Where-Object { $_.Name -ne "telemetry" }).Count -gt 0
+}
 
 $script:pass = 0
 $script:fail = 0
@@ -81,7 +94,7 @@ function Get-WefEntryCount {
 }
 
 # 夹具：一个模拟的分发包
-function New-Stage([switch]$WithAI, [string]$Gateway = "https://192.168.1.50:8443") {
+function New-Stage([switch]$WithAI, [string]$Gateway = "https://192.168.1.50:8443", [switch]$BogusCA) {
     $stage = Join-Path ([IO.Path]::GetTempPath()) ("tbinst_" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $stage | Out-Null
     Copy-Item (Join-Path $InstallDir "Install-Toolbox.ps1") $stage
@@ -93,6 +106,14 @@ function New-Stage([switch]$WithAI, [string]$Gateway = "https://192.168.1.50:844
         Copy-Item (Join-Path $InstallDir "ai\manifest.template.xml") $ai
         # 【不放 ca.crt】：那会改用户的受信任根存储，测试不该碰
         Set-Content -LiteralPath (Join-Path $ai "gateway.txt") -Value $Gateway -Encoding UTF8
+
+        # 【故意放一份坏证书】：内容不是证书，certutil 必然失败并退出非零，
+        # 【而且不会往受信任根存储里放进任何东西】——这正是我们要的：
+        # 用一个绝对安全的方式触发"最后一步失败"，去验证回滚。
+        if ($BogusCA) {
+            Set-Content -LiteralPath (Join-Path $ai "ca.crt") `
+                        -Value "this is not a certificate" -Encoding ASCII
+        }
     }
     return $stage
 }
@@ -107,13 +128,57 @@ function Invoke-Installer([string]$Stage, [string]$Keys, [string[]]$ExtraArgs) {
     return ($Keys | & powershell @psArgs 2>&1 | Out-String)
 }
 
+#-----------------------------------------------------------------------------
+# 【前置检查必须在动任何东西之前，而且不干净就直接中止】。
+#
+# 本脚本的 finally 会按名字模式删加载宏、缓存目录和 WEF 注册项。
+# 如果这台机器上用户本来就装着工具箱，那些删除【删的就是他的东西】——
+# 一个测试脚本把生产环境的安装毁掉，比它能发现的任何 bug 都严重。
+#
+# 所以这里用 throw 而不是断言：断言只是记一笔失败然后继续往下跑，
+# 照样会走到 finally 的清理。必须在创建任何状态之前就退出。
+#-----------------------------------------------------------------------------
+$preExistingAddins = @(Get-ChildItem $AddInsDir -Filter "ExcelToolbox*" -ErrorAction SilentlyContinue)
+$preExistingWef    = Get-WefEntryCount
+$preExistingCache  = Test-InstallCachePresent
+
+if ($preExistingAddins.Count -gt 0 -or $preExistingWef -gt 0 -or $preExistingCache) {
+    Write-Host ""
+    Write-Host "拒绝运行：这台机器上已经装了工具箱或 AI 助手。" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "本脚本会反复安装/卸载并在结束时清理，那些清理会删掉你现有的安装。" -ForegroundColor Yellow
+    Write-Host "检测到的现有状态：" -ForegroundColor Yellow
+    if ($preExistingAddins.Count -gt 0) { Write-Host "    加载宏：$(($preExistingAddins.Name) -join ', ')" -ForegroundColor Yellow }
+    if ($preExistingWef -gt 0)          { Write-Host "    WEF 注册项：$preExistingWef 个" -ForegroundColor Yellow }
+    if ($preExistingCache)              { Write-Host "    缓存目录里有安装内容：$CacheDir" -ForegroundColor Yellow }
+    Write-Host ""
+    Write-Host "请先卸载（双击 install\Excel工具箱.bat 选「全部卸载」）再跑本脚本。" -ForegroundColor Yellow
+    exit 2
+}
+
+$cleanupAllowed = $true      # 走到这里说明起点是干净的，finally 清理才安全
+
+# 【先把遥测缓冲挪走】。本脚本会反复调用真正的卸载流程，而卸载是
+# 整个删掉 %LOCALAPPDATA%\ExcelToolbox ——那里面有这台机器上尚未上报的
+# 遥测数据。测试不该顺手毁掉它，所以先搬到临时目录，结束时再放回去。
+$telemetryStash = $null
+if (Test-Path -LiteralPath $TelemetryDir) {
+    $telemetryStash = Join-Path ([IO.Path]::GetTempPath()) ("tbtelem_" + [guid]::NewGuid().ToString("N"))
+    try {
+        Move-Item -LiteralPath $TelemetryDir -Destination $telemetryStash -Force -ErrorAction Stop
+    } catch {
+        # 挪不走就别往下跑：继续跑等于明知会删掉它还照删
+        Write-Host "拒绝运行：无法暂存遥测缓冲（$TelemetryDir）：$($_.Exception.Message)" -ForegroundColor Red
+        exit 2
+    }
+}
+
 $stages = @()
 try {
-    # 前置：本机必须是干净的，否则后面的断言全都不可信
     Section "前置状态"
     $wefCacheExistedBefore = Test-Path $WefCache
-    Assert-Equal 0 (@(Get-ChildItem $AddInsDir -Filter "ExcelToolbox*" -ErrorAction SilentlyContinue)).Count "开始前没有已安装的加载宏"
-    Assert-Equal 0 (Get-WefEntryCount) "开始前没有本项目的 WEF 注册项"
+    Assert-Equal 0 $preExistingAddins.Count "开始前没有已安装的加载宏"
+    Assert-Equal 0 $preExistingWef          "开始前没有本项目的 WEF 注册项"
 
     #=========================================================================
     Section "不带 AI 包：行为与加入 AI 组件之前一致"
@@ -191,6 +256,50 @@ try {
     $null = Invoke-Installer $s4 "2" @()
 
     #=========================================================================
+    # 这一节守的是一类"没人会手工复现"的状态：安装走到最后一步才失败。
+    # 之前的回滚只做到"不删新写的东西"，重装场景下等于把用户原来
+    # 能用的那份配置改坏了又不还原。这里用一份坏证书逼出那条路径。
+    Section "最后一步失败时的回滚"
+
+    # --- 情况一：机器上本来就没装过，失败后必须不留痕 ---
+    $s6 = New-Stage -WithAI -BogusCA; $stages += $s6
+    $out = Invoke-Installer $s6 "" @("-AIOnly")
+    Assert-Match $out "*CA 证书安装失败*" "坏证书让最后一步失败"
+    Assert-Match $out "*已回滚*"          "失败后声明已回滚"
+    Assert-Equal 0 (Get-WefEntryCount)    "全新安装失败后不留注册项"
+    Assert-Equal $false (Test-Path (Join-Path $AITargetDir "manifest.xml")) "全新安装失败后不留 manifest"
+
+    # --- 情况二：机器上已有一份能用的配置，失败后必须还原成原样 ---
+    # 先装一份好的（不带 ca.crt，所以不碰证书存储）
+    $s7 = New-Stage -WithAI; $stages += $s7
+    $null = Invoke-Installer $s7 "" @("-AIOnly")
+    $manifest2 = Join-Path $AITargetDir "manifest.xml"
+    Assert-True (Test-Path $manifest2) "回滚用例的前置安装已就位"
+
+    # 把它改成可识别的"用户原有配置"。manifest 仍是合法 XML，
+    # 免得将来有人加了 XML 校验之后这条用例变成假通过。
+    $sentinelXml = "<OfficeApp><Id>SENTINEL-ORIGINAL</Id></OfficeApp>"
+    [IO.File]::WriteAllText($manifest2, $sentinelXml, [Text.UTF8Encoding]::new($false))
+    $sentinelReg = "$AITargetDir|SENTINEL"
+    New-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Value $sentinelReg `
+                     -PropertyType String -Force | Out-Null
+
+    # 再用坏证书重装一次：会覆盖上面两样，然后在最后一步失败
+    $s8 = New-Stage -WithAI -BogusCA; $stages += $s8
+    $out = Invoke-Installer $s8 "" @("-AIOnly")
+    Assert-Match $out "*CA 证书安装失败*" "重装同样在最后一步失败"
+
+    $after = [IO.File]::ReadAllText($manifest2, [Text.UTF8Encoding]::new($false))
+    Assert-Equal $sentinelXml $after "【已还原】原 manifest 内容被恢复，而不是留着覆盖后的版本"
+
+    $regNow = (Get-ItemProperty -Path $WefDeveloper -Name $AITargetDir -ErrorAction SilentlyContinue).$AITargetDir
+    Assert-Equal $sentinelReg $regNow "【已还原】原注册值被恢复，而不是被删掉或留成新值"
+
+    # 收尾：把这一节造出来的状态清掉，别影响后面的用例
+    $null = Invoke-Installer $s7 "2" @()
+    Assert-Equal 0 (Get-WefEntryCount) "回滚用例收尾后无残留注册项"
+
+    #=========================================================================
     Section "IT 非交互部署"
 
     $s5 = New-Stage; $stages += $s5
@@ -207,19 +316,38 @@ catch {
     Write-Host "测试过程异常：$($_.Exception.Message)" -ForegroundColor Red
 }
 finally {
-    # 保险起见再清一次：断言失败时上面的卸载可能没跑到
-    try {
-        Get-ChildItem $AddInsDir -Filter "ExcelToolbox*" -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-        if (Test-Path $CacheDir) { Remove-Item $CacheDir -Recurse -Force -ErrorAction SilentlyContinue }
-        $p = Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue
-        if ($p) {
-            $p.PSObject.Properties.Name | Where-Object { $_ -like "*ExcelToolbox*" } | ForEach-Object {
-                Remove-ItemProperty -Path $WefDeveloper -Name $_ -Force -ErrorAction SilentlyContinue
+    # 保险起见再清一次：断言失败时上面的卸载可能没跑到。
+    #
+    # 【只有起点确认干净时才允许清】。$cleanupAllowed 在前置检查通过后才置位；
+    # 前置不干净的路径根本走不到这里（那里直接 exit 2）。
+    # 这个标志是第二道保险：万一将来有人改动控制流，别让清理逻辑
+    # 在一台有真实安装的机器上跑起来。
+    if ($cleanupAllowed) {
+        try {
+            Get-ChildItem $AddInsDir -Filter "ExcelToolbox*" -ErrorAction SilentlyContinue |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+            if (Test-Path $CacheDir) { Remove-Item $CacheDir -Recurse -Force -ErrorAction SilentlyContinue }
+            $p = Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue
+            if ($p) {
+                $p.PSObject.Properties.Name | Where-Object { $_ -like "*ExcelToolbox*" } | ForEach-Object {
+                    Remove-ItemProperty -Path $WefDeveloper -Name $_ -Force -ErrorAction SilentlyContinue
+                }
             }
-        }
-    } catch {}
+        } catch {}
+    }
     foreach ($s in $stages) { Remove-Item $s -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # 把暂存的遥测缓冲放回去。放不回去要【喊出来】——
+    # 静默失败等于悄悄吞掉这台机器上尚未上报的数据。
+    if ($telemetryStash -and (Test-Path -LiteralPath $telemetryStash)) {
+        try {
+            $parent = Split-Path -Parent $TelemetryDir
+            if (-not (Test-Path -LiteralPath $parent)) { $null = New-Item -ItemType Directory -Path $parent -Force }
+            Move-Item -LiteralPath $telemetryStash -Destination $TelemetryDir -Force -ErrorAction Stop
+        } catch {
+            Write-Host "警告：遥测缓冲未能还原，它还在 $telemetryStash" -ForegroundColor Red
+        }
+    }
 }
 
 Write-Host ""

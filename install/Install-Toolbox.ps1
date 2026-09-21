@@ -237,9 +237,26 @@ function Install-AI {
 
     if (-not (Test-Path $AITargetDir)) { $null = New-Item -ItemType Directory -Path $AITargetDir -Force }
 
-    # 失败时要知道回滚到什么状态
+    # 失败时要知道回滚到什么状态。
+    #
+    # 【不能只记"之前有没有"，还要把原内容留住】。重装场景下 manifest 和
+    # 注册值都已经存在，我们会覆盖它们；如果后面某一步失败，只是"不删除"
+    # 并不能还原——用户原来能用的那份配置已经被我们改掉了。
+    # 备份的代价是几 KB 内存，换的是"失败之后至少回到原样"。
     $manifest = Join-Path $AITargetDir "manifest.xml"
     $manifestExistedBefore = Test-Path -LiteralPath $manifest
+    $manifestBackup = $null
+    if ($manifestExistedBefore) {
+        try { $manifestBackup = [IO.File]::ReadAllText($manifest, [Text.UTF8Encoding]::new($false)) } catch {}
+    }
+
+    $regBackup = $null
+    try {
+        $p = Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue
+        if ($p -and $p.PSObject.Properties.Name -contains $AITargetDir) {
+            $regBackup = $p.$AITargetDir
+        }
+    } catch {}
 
     # --- 1. 生成专属 manifest ---
     #
@@ -262,9 +279,9 @@ function Install-AI {
     }
     catch {
         Bad "manifest 生成失败：$($_.Exception.Message)"
-        if (-not $manifestExistedBefore) {
-            Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
-        }
+        Undo-AIPartialInstall -RegWritten $false -ManifestPath $manifest `
+                              -ManifestExistedBefore $manifestExistedBefore `
+                              -ManifestBackup $manifestBackup -RegBackup $regBackup
         return $false
     }
 
@@ -290,7 +307,8 @@ function Install-AI {
     catch {
         Bad "注册失败：$($_.Exception.Message)"
         Undo-AIPartialInstall -RegWritten $regWritten -ManifestPath $manifest `
-                              -ManifestExistedBefore $manifestExistedBefore
+                              -ManifestExistedBefore $manifestExistedBefore `
+                              -ManifestBackup $manifestBackup -RegBackup $regBackup
         return $false
     }
 
@@ -303,14 +321,32 @@ function Install-AI {
     if (Test-Path $ca) {
         Say "   即将把内网 CA 证书装入【当前用户】的受信任根存储。"
         Say "   这是为了让 Excel 信任内网的 https 地址；不装的话任务窗格会因证书错误打不开。"
-        $r = & certutil -user -addstore Root "$ca" 2>&1
-        if ($LASTEXITCODE -eq 0) {
+
+        # 【整段必须包异常】。只看 $LASTEXITCODE 是不够的：
+        # certutil 根本起不来（被策略禁用、PATH 里没有、被 AV 拦）时是抛异常，
+        # 那会直接跳出 Install-AI，绕过下面的回滚，
+        # 留下"manifest 和注册项都写了、证书没装"的半成品——
+        # 用户看到按钮，一点就是证书错误，比干脆没装还难排查。
+        $caOk = $false
+        $caMsg = ""
+        try {
+            $r = & certutil -user -addstore Root "$ca" 2>&1
+            $caOk = ($LASTEXITCODE -eq 0)
+            $caMsg = "$r"
+        }
+        catch {
+            $caOk = $false
+            $caMsg = "无法运行 certutil：$($_.Exception.Message)"
+        }
+
+        if ($caOk) {
             Good "CA 证书已安装"
         } else {
-            Bad "CA 证书安装失败：$r"
+            Bad "CA 证书安装失败：$caMsg"
             Undo-AIPartialInstall -RegWritten $regWritten -ManifestPath $manifest `
-                                  -ManifestExistedBefore $manifestExistedBefore
-            Say  "     已回滚（未注册、未留下 manifest），避免「按钮能点但打不开」的状态。"
+                                  -ManifestExistedBefore $manifestExistedBefore `
+                                  -ManifestBackup $manifestBackup -RegBackup $regBackup
+            Say  "     已回滚，避免「按钮能点但打不开」的状态。"
             return $false
         }
     }
@@ -334,22 +370,45 @@ function Undo-AIPartialInstall {
     param(
         [bool]$RegWritten,
         [string]$ManifestPath,
-        [bool]$ManifestExistedBefore
+        [bool]$ManifestExistedBefore,
+        [string]$ManifestBackup,
+        [string]$RegBackup
     )
 
+    # --- 注册项 ---
+    # 原先有值就还原成原值，原先没有才删掉。
+    # 一律删的话，重装失败会把用户本来好好的那条注册项也抹掉。
     if ($RegWritten) {
         try {
-            Remove-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Force -ErrorAction SilentlyContinue
-            $still = (Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue)
-            if ($still -and $still.PSObject.Properties.Name -contains $AITargetDir) {
-                Warn "回滚时未能删除注册项：$AITargetDir"
+            if ($null -ne $RegBackup -and $RegBackup -ne "") {
+                New-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Value $RegBackup `
+                                 -PropertyType String -Force | Out-Null
+                Say "     已还原注册项原值。"
             } else {
-                Say "     已回滚注册项。"
+                Remove-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Force -ErrorAction SilentlyContinue
+                $still = (Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue)
+                if ($still -and $still.PSObject.Properties.Name -contains $AITargetDir) {
+                    Warn "回滚时未能删除注册项：$AITargetDir"
+                } else {
+                    Say "     已回滚注册项。"
+                }
             }
         } catch { Warn "回滚注册项时出错：$($_.Exception.Message)" }
     }
 
-    if (-not $ManifestExistedBefore -and (Test-Path -LiteralPath $ManifestPath)) {
+    # --- manifest ---
+    if ($ManifestExistedBefore) {
+        if ($null -ne $ManifestBackup -and $ManifestBackup -ne "") {
+            try {
+                [IO.File]::WriteAllText($ManifestPath, $ManifestBackup, [Text.UTF8Encoding]::new($false))
+                Say "     已还原原 manifest。"
+            } catch { Warn "还原原 manifest 失败：$($_.Exception.Message)" }
+        } else {
+            # 之前存在但没备份成功（读文件就出错了）——如实说，别假装还原了
+            Warn "原 manifest 已被覆盖且无备份可还原：$ManifestPath"
+        }
+    }
+    elseif (Test-Path -LiteralPath $ManifestPath) {
         Remove-Item -LiteralPath $ManifestPath -Force -ErrorAction SilentlyContinue
         Say "     已回滚生成的 manifest。"
     }
@@ -629,6 +688,10 @@ if ($Uninstall) {
     # 顺序反了的话这里的判据会失效，注册表项留成悬空的。
     if (Test-AIInstalled) { Uninstall-AI }
 
+    # 【顺带会删掉未上报的遥测缓冲】（telemetry\ 就在这个目录下）。
+    # 这是有意为之：用户都把工具箱卸了，再留着他机器上的待上报数据没有道理。
+    # 代价是 IT 看不到这台机器最后那几条事件——可以接受。
+    # 注意升级不走这条路（安装流程不调用卸载），所以升级不会丢遥测。
     Step "删除缓存目录"
     if (Test-Path -LiteralPath $CacheDir) {
         Remove-Item -LiteralPath $CacheDir -Recurse -Force -ErrorAction SilentlyContinue
