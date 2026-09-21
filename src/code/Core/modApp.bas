@@ -10,7 +10,7 @@ Option Private Module
 
 Public Const APP_NAME As String = "Excel 通用工具箱"
 Public Const APP_ID As String = "ExcelToolbox"
-Public Const APP_VERSION As String = "1.0.0"
+Public Const APP_VERSION As String = "1.1.0"
 
 ' 宿主类型
 Public Enum HostKind
