@@ -230,8 +230,19 @@ Public Sub OnPaneEvent(ByVal tagName As String)
             ShowText modHelp.EnvReport()
 
         Case "html"
-            ' 完整 HTML 保留下来：要打印、要全文检索的时候它更合适
-            modHelp.ShowAll
+            ' 完整 HTML 保留下来：要打印、要全文检索的时候它更合适。
+            '
+            ' 【返回值必须看】。原先是直接丢掉的——生成失败时用户点了按钮
+            ' 什么都不会发生，也没有任何提示，只能以为工具坏了。
+            Dim htmlMsg As String
+            htmlMsg = modHelp.ShowAll()
+            If Len(htmlMsg) > 0 Then
+                ShowText htmlMsg
+            Else
+                ShowText "已生成完整帮助并交给默认浏览器打开。" & vbCrLf & vbCrLf & _
+                         "如果浏览器没有弹出来，多半是被安全策略拦了；" & vbCrLf & _
+                         "这个侧边栏里的内容是一样的，可以继续在这里看。"
+            End If
     End Select
     Exit Sub
 
@@ -400,6 +411,14 @@ Public Function PaneSelfTest() As String
     Me.Controls("btnEnv").Value = True
     r = r & "|btnObserved=" & CStr(InStr(mTxtBody.Text, "环境检查结果") > 0)
 
+    ' 8) HTML 按钮这条链也要有确定性判据：它的失败原先是被静默丢掉的。
+    '    成功与失败都会在正文区留下话，所以只要正文非空就说明有反馈；
+    '    再单独标出"是不是失败信息"，让测试能区分。
+    mTxtBody.Text = ""
+    OnPaneEvent "html"
+    r = r & "|htmlFeedback=" & CStr(Len(mTxtBody.Text) > 0)
+    r = r & "|htmlOk=" & CStr(InStr(mTxtBody.Text, "帮助内容不可用") = 0)
+
     ' 附带观察一次事件是否真的送达（只改 ListIndex，不手工调）。
     ' 【这一条是观察值，不作为硬性判据】：程序设 ListIndex 是否触发
     ' Click 取决于 MSForms 实现，换个 Office 版本可能不一样。
@@ -445,7 +464,7 @@ End Function
 Private Function WelcomeText() As String
     WelcomeText = _
         "工具箱帮助" & vbCrLf & String$(28, "=") & vbCrLf & vbCrLf & _
-        "左边选分组 → 选功能，这里会显示：" & vbCrLf & _
+        "上面先选分组、再选功能，这里就会显示：" & vbCrLf & _
         "　　什么时候用　／　怎么用　／　示例　／　注意" & vbCrLf & vbCrLf & _
         "【第一次用，或者装完没反应】" & vbCrLf & _
         "先看最上面那组「使用前必读（Excel 配置）」，" & vbCrLf & _
