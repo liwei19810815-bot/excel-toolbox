@@ -46,7 +46,15 @@ if (-not (Test-Path $Xlam)) { throw "找不到 $Xlam。请先运行 build\build.
 $AddInsDir    = Join-Path $env:APPDATA "Microsoft\AddIns"
 $CacheDir     = Join-Path $env:LOCALAPPDATA "ExcelToolbox"
 $AITargetDir  = Join-Path $CacheDir "ai"
-$WefDeveloper = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
+# 【测试一律走自己的 WEF 键，不碰用户真实的那个】。
+# 安装脚本的 -WefRoot 就是为此留的测试缝（默认值即生产行为）。
+# 这样即使断言失败、清理没跑完，用户 Office 里真实的加载项注册也毫发无损。
+$WefDeveloper = "HKCU:\Software\ExcelToolboxTest\WEF\Developer"
+
+# 故意指向一个不存在的 PowerShell 驱动器，让注册表写入必然失败。
+# 去掉装 CA 那一步之后，注册表成了安装的最后一步，这是触发
+# "写到一半失败 → 回滚 → 还原原值" 那条路径的唯一办法。
+$BadWefRoot = "NoSuchDrive:\ExcelToolboxTest"
 $WefCache     = Join-Path $env:LOCALAPPDATA "Microsoft\Office\16.0\Wef"
 $TelemetryDir = Join-Path $CacheDir "telemetry"
 
@@ -101,7 +109,7 @@ function Get-WefEntryCount {
 }
 
 # 夹具：一个模拟的分发包
-function New-Stage([switch]$WithAI, [string]$Gateway = "https://192.168.1.50:8443", [switch]$BogusCA) {
+function New-Stage([switch]$WithAI, [string]$Gateway = "https://192.168.1.50:8443") {
     $stage = Join-Path ([IO.Path]::GetTempPath()) ("tbinst_" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $stage | Out-Null
     Copy-Item (Join-Path $InstallDir "Install-Toolbox.ps1") $stage
@@ -111,16 +119,8 @@ function New-Stage([switch]$WithAI, [string]$Gateway = "https://192.168.1.50:844
         $ai = Join-Path $stage "ai"
         New-Item -ItemType Directory -Path $ai | Out-Null
         Copy-Item (Join-Path $InstallDir "ai\manifest.template.xml") $ai
-        # 【不放 ca.crt】：那会改用户的受信任根存储，测试不该碰
         Set-Content -LiteralPath (Join-Path $ai "gateway.txt") -Value $Gateway -Encoding UTF8
-
-        # 【故意放一份坏证书】：内容不是证书，certutil 必然失败并退出非零，
-        # 【而且不会往受信任根存储里放进任何东西】——这正是我们要的：
-        # 用一个绝对安全的方式触发"最后一步失败"，去验证回滚。
-        if ($BogusCA) {
-            Set-Content -LiteralPath (Join-Path $ai "ca.crt") `
-                        -Value "this is not a certificate" -Encoding ASCII
-        }
+        # 【不放 ca.crt】：安装程序已经不装证书了，分发包里也不该再有它。
     }
     return $stage
 }
@@ -129,28 +129,22 @@ function New-Stage([switch]$WithAI, [string]$Gateway = "https://192.168.1.50:844
 # 用作参数名时传进来的值会被管道语义覆盖掉——表现是所有按键都丢失、
 # 被测脚本读到 EOF 后走默认分支，于是每个用例都变成"直接回车安装"，
 # 而失败信息看起来像是"菜单没实现"，极具误导性。
-function Invoke-Installer([string]$Stage, [string]$Keys, [string[]]$ExtraArgs, [switch]$BreakCertutil) {
+function Invoke-Installer([string]$Stage, [string]$Keys, [string[]]$ExtraArgs, [switch]$FailRegistry) {
     $sc = Join-Path $Stage "Install-Toolbox.ps1"
-    $psArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $sc, "-NoTrustedLocation") + $ExtraArgs
 
-    # 【用全路径启动子进程】。下面可能要把 PATH 换掉，
-    # 而 `powershell` 这个名字本身就是靠 PATH 解析的。
+    # 【每次调用都带上 -WefRoot】，让被测脚本写到测试专用的键上，
+    # 绝不碰用户 Office 里真实的加载项注册。
+    # -FailRegistry 时换成一个不存在的驱动器，注册表写入必然失败，
+    # 用来触发"写到一半失败 → 回滚"那条路径。
+    $wef = if ($FailRegistry) { $BadWefRoot } else { $WefDeveloper }
+
+    $psArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $sc,
+                "-NoTrustedLocation", "-WefRoot", $wef) + $ExtraArgs
+
     $exe = Join-Path $PSHOME "powershell.exe"
 
-    # 【模拟 certutil 根本起不来】。把子进程的 PATH 换成只有夹具目录的值，
-    # System32 不在里面，于是 `& certutil` 连解析都失败、直接抛
-    # CommandNotFoundException——这跟"certutil 跑起来了但返回非零"
-    # 是【两条不同的代码路径】，只有前者能验证 try/catch 兜没兜住。
-    # 现实里对应的是 certutil 被组策略禁用、被 AV 拦、或不在 PATH 上。
-    $savedPath = $env:PATH
-    if ($BreakCertutil) { $env:PATH = $Stage }
-    try {
-        $out = ($Keys | & $exe @psArgs 2>&1 | Out-String)
-        $script:lastInstallerExit = $LASTEXITCODE
-    }
-    finally {
-        $env:PATH = $savedPath
-    }
+    $out = ($Keys | & $exe @psArgs 2>&1 | Out-String)
+    $script:lastInstallerExit = $LASTEXITCODE
     return $out
 }
 
@@ -307,16 +301,20 @@ try {
     $null = Invoke-Installer $s4 "2" @()
 
     #=========================================================================
-    # 这一节守的是一类"没人会手工复现"的状态：安装走到最后一步才失败。
-    # 之前的回滚只做到"不删新写的东西"，重装场景下等于把用户原来
-    # 能用的那份配置改坏了又不还原。这里用一份坏证书逼出那条路径。
-    Section "最后一步失败时的回滚"
+    # 这一节守的是一类"没人会手工复现"的状态：安装写到一半失败。
+    # 回滚不能只做到"不删新写的东西"——重装场景下那等于把用户原来
+    # 能用的那份配置改坏了又不还原。
+    #
+    # 【触发方式变了】。去掉装 CA 那一步之后，注册表成了最后一步，
+    # 原先"放一份坏 ca.crt 逼 certutil 失败"的注入点没有了。
+    # 现在用 -WefRoot 指向一个不存在的驱动器，让注册表写入必然失败。
+    Section "写入失败时的回滚"
 
     # --- 情况一：机器上本来就没装过，失败后必须不留痕 ---
-    $s6 = New-Stage -WithAI -BogusCA; $stages += $s6
-    $out = Invoke-Installer $s6 "" @("-AIOnly")
-    Assert-Match $out "*CA 证书安装失败*" "坏证书让最后一步失败"
-    Assert-Match $out "*已回滚*"          "失败后声明已回滚"
+    $s6 = New-Stage -WithAI; $stages += $s6
+    $out = Invoke-Installer $s6 "" @("-AIOnly") -FailRegistry
+    Assert-Match $out "*注册失败*"  "注册表写不进去时安装失败"
+    Assert-Match $out "*已回滚*"    "失败后声明已回滚"
     # 【退出码要单独断言】。只匹配输出文字的话，安装失败却 exit 0
     # 这种错误在这里完全看不出来，而 IT 的批量部署脚本正是靠退出码
     # 判断该不该重试、该不该告警的。
@@ -325,7 +323,6 @@ try {
     Assert-Equal $false (Test-Path (Join-Path $AITargetDir "manifest.xml")) "全新安装失败后不留 manifest"
 
     # --- 情况二：机器上已有一份能用的配置，失败后必须还原成原样 ---
-    # 先装一份好的（不带 ca.crt，所以不碰证书存储）
     $s7 = New-Stage -WithAI; $stages += $s7
     $null = Invoke-Installer $s7 "" @("-AIOnly")
     $manifest2 = Join-Path $AITargetDir "manifest.xml"
@@ -339,45 +336,34 @@ try {
     New-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Value $sentinelReg `
                      -PropertyType String -Force | Out-Null
 
-    # 再用坏证书重装一次：会覆盖上面两样，然后在最后一步失败
-    $s8 = New-Stage -WithAI -BogusCA; $stages += $s8
-    $out = Invoke-Installer $s8 "" @("-AIOnly")
-    Assert-Match $out "*CA 证书安装失败*" "重装同样在最后一步失败"
+    # 再装一次并让注册表写入失败：manifest 已经被覆盖了，必须还原回去
+    $out = Invoke-Installer $s7 "" @("-AIOnly") -FailRegistry
+    Assert-Match $out "*注册失败*" "重装时注册表写入同样失败"
 
     $after = [IO.File]::ReadAllText($manifest2, [Text.UTF8Encoding]::new($false))
     Assert-Equal $sentinelXml $after "【已还原】原 manifest 内容被恢复，而不是留着覆盖后的版本"
 
+    # 注册项走的是失败的那个 WefRoot，真实测试键里的原值不该被动过
     $regNow = (Get-ItemProperty -Path $WefDeveloper -Name $AITargetDir -ErrorAction SilentlyContinue).$AITargetDir
-    Assert-Equal $sentinelReg $regNow "【已还原】原注册值被恢复，而不是被删掉或留成新值"
+    Assert-Equal $sentinelReg $regNow "原注册值原封不动（写入压根没成功，不该被误删）"
 
-    # --- 情况三：原值是【空的】，回滚必须还原成空，而不是删掉 ---
+    # --- 情况三：原 manifest 是【空的】，回滚必须还原成空，而不是删掉 ---
     # 这条守的是一个纯靠肉眼看不出来的差别：用 `$backup -ne ""` 判断
-    # "有没有备份"时，本来就是空值的配置会被当成"没有备份"，
+    # "有没有备份"时，本来就是空的原文件会被当成"没有备份"，
     # 于是回滚去删它。状态对不上，而且不会有任何测试因此变红。
-    $null = Invoke-Installer $s7 "" @("-AIOnly")
     [IO.File]::WriteAllText($manifest2, "", [Text.UTF8Encoding]::new($false))
-    New-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Value "" `
-                     -PropertyType String -Force | Out-Null
 
-    $out = Invoke-Installer $s8 "" @("-AIOnly")
-    Assert-Match $out "*CA 证书安装失败*" "空原值场景同样在最后一步失败"
+    $out = Invoke-Installer $s7 "" @("-AIOnly") -FailRegistry
+    Assert-Match $out "*注册失败*" "空原值场景同样触发回滚"
+    Assert-True (Test-Path $manifest2) "【空值也算原值】空 manifest 被还原（而不是被删掉）"
     Assert-Equal "" ([IO.File]::ReadAllText($manifest2, [Text.UTF8Encoding]::new($false))) `
-                 "【空值也算原值】空 manifest 被还原成空，而不是留着覆盖后的内容"
-    $emptyProps = (Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue)
-    Assert-True ($emptyProps -and ($emptyProps.PSObject.Properties.Name -contains $AITargetDir)) `
-                "【空值也算原值】空注册值被还原，而不是被删掉"
-    Assert-Equal "" $emptyProps.$AITargetDir "空注册值还原后仍是空串"
+                 "【空值也算原值】空 manifest 还原后仍是空，而不是留着覆盖后的内容"
 
-    # --- 情况四：certutil 根本起不来（抛异常，不是返回非零） ---
-    # 只看退出码的写法在这条路径上会直接把异常抛出函数、【绕过回滚】，
-    # 留下"manifest 和注册项都写了、证书没装"的半成品。
-    $null = Invoke-Installer $s7 "2" @()
-    $s9 = New-Stage -WithAI -BogusCA; $stages += $s9
-    $out = Invoke-Installer $s9 "" @("-AIOnly") -BreakCertutil
-    Assert-Match $out "*无法运行 certutil*" "certutil 起不来时被 try/catch 兜住"
-    Assert-Match $out "*已回滚*"            "certutil 起不来时同样触发回滚"
-    Assert-Equal 0 (Get-WefEntryCount)      "certutil 起不来后不留注册项"
-    Assert-Equal $false (Test-Path (Join-Path $AITargetDir "manifest.xml")) "certutil 起不来后不留 manifest"
+    # --- 情况四：安装程序不碰证书存储 ---
+    # 这条守的是一个承诺而不是功能：装个 Excel 插件不该往用户的
+    # 受信任根存储里塞根证书——那会降低他整台机器的防护等级。
+    Assert-True ($out -notlike "*certutil*")   "安装过程不调用 certutil"
+    Assert-True ($out -notlike "*受信任根*")   "安装过程不往受信任根存储写东西"
 
     # 收尾：把这一节造出来的状态清掉，别影响后面的用例
     $null = Invoke-Installer $s7 "2" @()
@@ -444,13 +430,17 @@ finally {
             }
         } catch { $cleanupProblems += "缓存目录：$($_.Exception.Message)" }
 
-        # WEF：只删【本程序自己那一条】（键名就是 $AITargetDir），不按模式扫
+        # WEF：整个测试键删掉。
+        # 【这里删的是测试专用的键】（HKCU:\Software\ExcelToolboxTest），
+        # 用户真实的 Office WEF 注册从头到尾没被碰过——安装脚本的
+        # -WefRoot 测试缝就是为此存在的。
         try {
-            $p = Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue
-            if ($p -and $p.PSObject.Properties.Name -contains $AITargetDir) {
-                Remove-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Force -ErrorAction Stop
+            $testRoot = "HKCU:\Software\ExcelToolboxTest"
+            if (Test-Path $testRoot) {
+                Remove-Item -Path $testRoot -Recurse -Force -ErrorAction Stop
+                if (Test-Path $testRoot) { $cleanupProblems += "测试注册表键没删掉：$testRoot" }
             }
-        } catch { $cleanupProblems += "WEF 注册项：$($_.Exception.Message)" }
+        } catch { $cleanupProblems += "测试注册表键：$($_.Exception.Message)" }
 
         # 【清理失败不能静默吞掉】。吞掉的话，残留会被下一轮的前置门
         # 当成"用户已有安装"而拒绝运行，排查时完全看不出是上一轮没清干净。

@@ -39,10 +39,6 @@
     带上就在包里放 ai\ 目录（AI 助手组件），值是内网网关地址。
     不带就不放，安装程序检测不到 ai\ 就不会向用户提这一项。
 
-.PARAMETER CaCert
-    内网自签 CA 证书（.crt）的路径。网关用自签证书时必须给，
-    否则任务窗格会因证书不受信任而打不开。
-
 .PARAMETER SkipBuild
     不重新构建，直接用 dist\ 里现有的产物。见上面的告诫。
 
@@ -55,7 +51,14 @@
 
 .EXAMPLE
     # 独立版 + AI 助手
-    powershell -ExecutionPolicy Bypass -File build\pack.ps1 -Gateway "https://192.168.1.50:8443" -CaCert "C:\certs\intranet-ca.crt"
+    powershell -ExecutionPolicy Bypass -File build\pack.ps1 -Gateway "https://ai.corp.example.com"
+
+.NOTES
+    【本工具不再接受 CA 证书】。早先支持 -CaCert，把内网自签根证书打进包里
+    由安装程序装进用户的受信任根存储——那是降低用户整台机器防护等级的操作，
+    影响远不止这一个加载项。现在的前提是网关用【已被客户端信任】的证书
+    （域内 PKI 统一下发或公网证书）。若 IT 只能提供自签证书，
+    应由 IT 用组策略统一下发根证书，而不是让安装包替用户做这个决定。
 #>
 [CmdletBinding()]
 param(
@@ -64,7 +67,7 @@ param(
 
     [string]$SharePath = "",
     [string]$Gateway   = "",
-    [string]$CaCert    = "",
+
     [string]$OutDir    = "",
     [switch]$SkipBuild
 )
@@ -148,27 +151,11 @@ if ($withAI) {
     $Gateway = $Gateway.TrimEnd('/')
     Write-Ok "网关地址：$Gateway"
 
-    if ($CaCert) {
-        if (-not (Test-Path -LiteralPath $CaCert)) { throw "找不到 -CaCert 指定的证书：$CaCert" }
-        # 【必须真的解析一遍】。放错文件（比如把私钥或一个文本文件当证书）
-        # 在这里看不出来，要等安装时 certutil 失败才发现——那时候包已经发出去了。
-        try {
-            $c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 `
-                     -ArgumentList (Resolve-Path -LiteralPath $CaCert).Path
-            Write-Ok "CA 证书可解析：$($c.Subject)（有效期至 $($c.NotAfter.ToString('yyyy-MM-dd'))）"
-            if ($c.NotAfter -lt (Get-Date)) { Add-Problem "CA 证书已经过期：$($c.NotAfter)" }
-            elseif ($c.NotAfter -lt (Get-Date).AddDays(90)) {
-                Write-Warn "CA 证书 90 天内到期（$($c.NotAfter.ToString('yyyy-MM-dd'))），到期后任务窗格会打不开。"
-            }
-        } catch {
-            throw "-CaCert 不是一份能解析的证书：$CaCert（$($_.Exception.Message)）"
-        }
-    } else {
-        Write-Warn "没给 -CaCert。网关若用自签证书，任务窗格会因证书不受信任而打不开。"
-    }
-}
-elseif ($CaCert) {
-    Write-Warn "没给 -Gateway，不会打包 ai\ 目录，-CaCert 已忽略。"
+    # 【网关证书必须已被客户端信任】，这是走 Office.js 的硬前提：
+    # 证书不受信任时任务窗格是【空白且不报错】的，用户只会以为工具坏了。
+    # 本工具不再打包 CA、安装程序也不再装证书，所以这一条只能靠部署时保证。
+    Write-Warn "请确认网关的证书【已被客户端信任】（域内 PKI 下发或公网证书）。"
+    Write-Warn "用自签且未下发根证书的话，任务窗格会空白且不报错——这是最难排查的一种故障。"
 }
 
 #-----------------------------------------------------------------------------
@@ -268,14 +255,14 @@ if ($withAI) {
     # 而 Office 遇到非法 manifest 是静默不加载。
     [IO.File]::WriteAllText((Join-Path $aiOut "gateway.txt"), $Gateway, [Text.UTF8Encoding]::new($false))
 
-    if ($CaCert) { Copy-Item -LiteralPath $CaCert -Destination (Join-Path $aiOut "ca.crt") }
+
 
     # 示例 GUID 没换会让两个组织的加载项互相覆盖，且极难排查
     $tplText = [IO.File]::ReadAllText($tplPath, [Text.UTF8Encoding]::new($false))
     if ($tplText -match '7b2e4c91-6a38-4d5f-9e10-3c8a5f2d6b47') {
         Write-Warn "manifest 模板里还是示例 GUID。正式分发前请换成你自己的（见 install\ai\README.txt）。"
     }
-    Write-Ok "ai\ 组件已就位（manifest 模板 + gateway.txt$(if ($CaCert) { ' + ca.crt' }))"
+    Write-Ok "ai 组件已就位（manifest 模板 + gateway.txt）"
 }
 
 #-----------------------------------------------------------------------------
@@ -358,7 +345,7 @@ $listLines += ""
 $listLines += "版本      ：$Version"
 $listLines += "形态      ：$(if ($Mode -eq 'loader') { 'loader（瘦加载器，载荷从共享目录自动更新）' } else { 'standalone（独立版，功能全在包里）' })"
 if ($Mode -eq "loader") { $listLines += "共享目录  ：$SharePath" }
-$listLines += "AI 组件   ：$(if ($withAI) { "有（网关 $Gateway$(if ($CaCert) { '，含 CA 证书' } else { '，无 CA 证书' })）" } else { '无' })"
+$listLines += "AI 组件   ：$(if ($withAI) { "有（网关 $Gateway；不含证书，网关证书须已被客户端信任）" } else { '无' })"
 $listLines += "打包时间  ：$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 $listLines += "打包机器  ：$env:COMPUTERNAME"
 $listLines += "打包账号  ：$env:USERNAME"

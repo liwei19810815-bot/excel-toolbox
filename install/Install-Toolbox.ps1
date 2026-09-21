@@ -46,7 +46,17 @@ param(
     # 【和工具箱本体是两个东西】：工具箱是 VBA 加载宏，装在本机；
     # AI 是网页加载项，从内网地址实时加载。两者各装各的，互不依赖。
     [switch]$WithAI,
-    [switch]$AIOnly
+    [switch]$AIOnly,
+
+    # 【测试缝，正常使用不要传】。默认值就是生产行为，不新增任何分支逻辑。
+    #
+    # 去掉装 CA 那一步之后，「注册表」成了安装的最后一步，
+    # 原先靠"放一份坏 ca.crt 逼 certutil 失败"来触发回滚的办法就没了。
+    # 回滚逻辑（覆盖前备份、失败还原）必须继续有测试守着，否则它会悄悄烂掉。
+    #
+    # 传一个可写的测试键 → 整套安装器测试不再碰用户真实的 WEF 注册项；
+    # 传一个非法键路径 → 注册表写入失败，走到回滚，验证 manifest 被还原。
+    [string]$WefRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -169,13 +179,15 @@ function Get-InstalledAddins {
 # 分发包里可选带一个 ai\ 目录：
 #     ai\manifest.template.xml   带 {{USER}} 和 {{GATEWAY}} 占位符
 #     ai\gateway.txt             一行，内网网关地址
-#     ai\ca.crt                  （可选）内网自签 CA 证书
+#
+# 【不再需要 ca.crt】：本安装程序不往用户的受信任根存储里装任何证书。
+# 前提是网关用【已被客户端信任】的证书（域内 PKI 下发或公网证书）。
 #
 # 没有这个目录就整段跳过——个人从 GitHub 下载的包里不会有它。
 #-----------------------------------------------------------------------------
 $AIDir        = Join-Path $Here "ai"
 $AITargetDir  = Join-Path $env:LOCALAPPDATA "ExcelToolbox\ai"
-$WefDeveloper = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
+$WefDeveloper = if ($WefRoot) { $WefRoot } else { "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer" }
 
 function Test-AIPackagePresent {
     return (Test-Path (Join-Path $AIDir "manifest.template.xml"))
@@ -201,8 +213,9 @@ function Test-AIInstalled {
 # 三步，都不需要管理员权限：
 #   1. 按【当前用户名】生成专属 manifest（身份靠 URL 参数传给任务窗格——
 #      Office.js 沙箱读不到用户名，只能这么注入，详见 docs\AI接入与白名单.md）
-#   2. 装内网自签 CA 到【当前用户】的受信任根存储（有 ca.crt 才做）
-#   3. 写 HKCU\...\WEF\Developer 告诉 Excel 去哪找 manifest
+#   2. 写 HKCU\...\WEF\Developer 告诉 Excel 去哪找 manifest
+#
+# 【不装证书】。网关必须用已被客户端信任的证书，理由见下面第 3 段。
 #-----------------------------------------------------------------------------
 function Install-AI {
     Step "安装 AI 助手"
@@ -340,45 +353,23 @@ function Install-AI {
         return $false
     }
 
-    # --- 3. 内网 CA ---
+    # --- 3. 证书？不装。 ---
     #
-    # 【装不上就整体失败并回滚】。放过去只告警然后继续，结果是
-    # "CA 没装但加载项已注册"——用户打开 Excel 看到按钮，一点就是证书错误，
-    # 比干脆没装还难排查。自签网关下 CA 是硬依赖，不该半装。
-    $ca = Join-Path $AIDir "ca.crt"
-    if (Test-Path $ca) {
-        Say "   即将把内网 CA 证书装入【当前用户】的受信任根存储。"
-        Say "   这是为了让 Excel 信任内网的 https 地址；不装的话任务窗格会因证书错误打不开。"
-
-        # 【整段必须包异常】。只看 $LASTEXITCODE 是不够的：
-        # certutil 根本起不来（被策略禁用、PATH 里没有、被 AV 拦）时是抛异常，
-        # 那会直接跳出 Install-AI，绕过下面的回滚，
-        # 留下"manifest 和注册项都写了、证书没装"的半成品——
-        # 用户看到按钮，一点就是证书错误，比干脆没装还难排查。
-        $caOk = $false
-        $caMsg = ""
-        try {
-            $r = & certutil -user -addstore Root "$ca" 2>&1
-            $caOk = ($LASTEXITCODE -eq 0)
-            $caMsg = "$r"
-        }
-        catch {
-            $caOk = $false
-            $caMsg = "无法运行 certutil：$($_.Exception.Message)"
-        }
-
-        if ($caOk) {
-            Good "CA 证书已安装"
-        } else {
-            Bad "CA 证书安装失败：$caMsg"
-            Undo-AIPartialInstall -RegWritten $regWritten -ManifestPath $manifest `
-                                  -ManifestExistedBefore $manifestExistedBefore `
-                                  -ManifestBackup $manifestBackup -RegBackup $regBackup `
-                              -HasManifestBackup $hasManifestBackup -HasRegBackup $hasRegBackup
-            Say  "     已回滚，避免「按钮能点但打不开」的状态。"
-            return $false
-        }
-    }
+    # 【本安装程序不碰证书存储】。
+    #
+    # 早先这里会把内网自签 CA 装进当前用户的受信任根存储，因为
+    # Office.js 要求任务窗格必须走 https，自签证书不被信任时任务窗格
+    # 【空白且不报错】。但"往用户的受信任根存储里塞证书"是降低他整台机器
+    # 防护等级的操作——那一个根证书能为任意域签发被信任的证书，
+    # 影响远不止这个加载项。装个 Excel 插件不该有这种副作用。
+    #
+    # 现在的前提是：**网关用已经被客户端信任的证书**
+    # （域内 PKI 统一下发，或公网证书）。这样什么都不用装。
+    #
+    # 如果 IT 最终只能提供自签证书，正确做法是让 IT 用组策略统一下发根证书，
+    # 而不是由这个安装包替用户做这个决定。
+    #
+    # 详见 docs\AI接入与白名单.md。
 
     return $true
 }
@@ -473,9 +464,8 @@ function Uninstall-AI {
         if (Test-Path $AITargetDir) { Warn "目录删除失败：$AITargetDir" } else { Good "已删除 $AITargetDir" }
     } else { Good "目录本来就不存在" }
 
-    # 【CA 证书不动】——它可能是 IT 统一下发的，别的内网系统也在用。
-    # 卸载一个加载项就把公司的根证书删掉，代价远大于收益。
-    Say "   注：内网 CA 证书未删除（可能有其他内网系统在用）。"
+    # 【证书存储从头到尾没碰过】：安装时就没装任何证书，卸载自然也不用删。
+    # 网关证书是 IT 统一管理的，和这个加载项的生命周期无关。
 
     # 【Office 的 WEF 缓存目录也不动】。
     #
