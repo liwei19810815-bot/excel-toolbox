@@ -50,6 +50,13 @@ $WefDeveloper = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
 $WefCache     = Join-Path $env:LOCALAPPDATA "Microsoft\Office\16.0\Wef"
 $TelemetryDir = Join-Path $CacheDir "telemetry"
 
+# 安装程序只会往这两个路径放加载宏（独立版 / 自动更新版）。
+# 收尾清理【只认这个名单】，不去目录里扫名字模式——见 finally 里的说明。
+$KnownAddinPaths = @(
+    (Join-Path $AddInsDir "ExcelToolbox.xlam")
+    (Join-Path $AddInsDir "ExcelToolboxLoader.xlam")
+)
+
 # 【缓存目录存在 ≠ 装过工具箱】。%LOCALAPPDATA%\ExcelToolbox 被三样东西共用：
 # 自动更新的载荷缓存、AI 的 ai\、以及【加载宏运行时写的 telemetry\ 缓冲】。
 # 遥测缓冲只要有人用过工具箱就会有，跟装没装没关系——
@@ -409,15 +416,19 @@ finally {
     if ($cleanupAllowed) {
         $cleanupProblems = @()
 
-        # 加载宏：只删前置快照里【没有】的文件（起点为空，所以就是本次新增的）
-        try {
-            $before = @($preExistingAddins | ForEach-Object { $_.FullName })
-            foreach ($f in @(Get-ChildItem $AddInsDir -Filter "ExcelToolbox*" -ErrorAction SilentlyContinue)) {
-                if ($before -notcontains $f.FullName) {
-                    Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+        # 加载宏：【只删写死的那两个路径】，不做目录级差集。
+        # 差集的写法是"扫一遍 ExcelToolbox*，删掉不在前置快照里的"，
+        # 听着精确，实际仍然会误删：测试跑的这几分钟里，别的会话
+        # 装进来的同名文件也不在快照里，照样被当成"本轮造的"删掉。
+        # 安装程序会往哪儿放文件是确定的，直接写死这些路径最准。
+        foreach ($p in $KnownAddinPaths) {
+            try {
+                if (Test-Path -LiteralPath $p) {
+                    Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+                    if (Test-Path -LiteralPath $p) { $cleanupProblems += "加载宏没删掉：$p" }
                 }
-            }
-        } catch { $cleanupProblems += "加载宏：$($_.Exception.Message)" }
+            } catch { $cleanupProblems += "加载宏 $([IO.Path]::GetFileName($p))：$($_.Exception.Message)" }
+        }
 
         # 缓存目录：telemetry 已经被暂存走了，这里只清其余内容；
         # 清完若已空则连目录一起删，留着空目录会让下一轮的判据更难写
@@ -448,7 +459,15 @@ finally {
             Write-Host "  FAIL  收尾清理有残留：$($cleanupProblems -join '；')" -ForegroundColor Red
         }
     }
-    foreach ($s in $stages) { Remove-Item $s -Recurse -Force -ErrorAction SilentlyContinue }
+    # 夹具目录同样"删完要确认"：删不掉通常意味着里面的脚本还被占用，
+    # 那是个信号（有子进程没退干净），不该当成无事发生。
+    foreach ($s in $stages) {
+        Remove-Item -LiteralPath $s -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $s) {
+            $script:fail++
+            Write-Host "  FAIL  夹具目录没能删掉（可能有文件被占用）：$s" -ForegroundColor Red
+        }
+    }
 
     # 把暂存的遥测缓冲放回去。
     #
@@ -471,7 +490,14 @@ finally {
                     }
                     Move-Item -LiteralPath $f.FullName -Destination $dest -Force -ErrorAction Stop
                 }
+                # 【删完要确认真的没了】。留下来的话，下一轮开头的
+                # "遗留 stash" 检测会拒绝运行，而那时已经看不出
+                # 是这一轮没收干净。
                 Remove-Item -LiteralPath $telemetryStash -Recurse -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $telemetryStash) {
+                    $script:fail++
+                    Write-Host "  FAIL  遥测暂存目录没能删掉：$telemetryStash" -ForegroundColor Red
+                }
             }
             else {
                 $parent = Split-Path -Parent $TelemetryDir

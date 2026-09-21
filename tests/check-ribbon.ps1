@@ -120,7 +120,19 @@ try {
             if ($sc -like "*ribbon=True") { $ok = $true; break }
         }
         catch {
-            # 记下来但继续等——真的起不来的话，循环跑完照样会判失败
+            # 【只对"应用程序正忙"重试，别的异常立刻失败】。
+            # 无差别重试会降低敏感度：一个真实故障如果在这 24 秒里
+            # 偶然自愈，测试就变绿了——等于用等待把问题盖住。
+            # RPC_E_CALL_REJECTED (0x8001010A) 和 RPC_E_SERVERCALL_RETRYLATER
+            # (0x8001010A/0x80010100 系列) 才是"等一下就好"的那类。
+            $hr = 0
+            try { $hr = $_.Exception.InnerException.HResult } catch {}
+            if ($hr -eq 0) { try { $hr = $_.Exception.HResult } catch {} }
+
+            $busy = ($hr -eq 0x8001010A) -or ($hr -eq 0x8001010D) -or
+                    ($_.Exception.Message -like "*0x8001010A*")
+            if (-not $busy) { throw }      # 不是"忙"，就是真错，交给外层 catch
+
             $lastErr = $_.Exception.Message
         }
     }

@@ -197,10 +197,21 @@ if ($SkipBuild) {
     # 【只比对真正进了这个产物的源码】。拿整个 src\ 去比的话，
     # 打独立版时会被 src\loader 的改动触发——一条经常误报的检查
     # 等于没有检查，人会习惯性忽略它。
-    $srcDirs = if ($Mode -eq "loader") { @("src\loader") } else { @("src\code", "src\package", "src\help") }
-    $newestSrc = $srcDirs |
-                 ForEach-Object { Get-ChildItem (Join-Path $RepoRoot $_) -Recurse -File -ErrorAction SilentlyContinue } |
-                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    # 【构建脚本本身也算输入】。只盯着 src\ 的话，改了 build.ps1
+    # （比如换了注入 customUI 的方式）而没重新构建，产物照样"比源码新"，
+    # 于是打出一个内容过期的包——同样没有任何征兆。
+    if ($Mode -eq "loader") {
+        $srcDirs   = @("src\loader")
+        $srcFiles  = @("build\build-loader.ps1", "build\_ExcelHost.ps1")
+    } else {
+        $srcDirs   = @("src\code", "src\package", "src\help")
+        $srcFiles  = @("build\build.ps1", "build\_ExcelHost.ps1")
+    }
+
+    $inputs = @()
+    $inputs += $srcDirs  | ForEach-Object { Get-ChildItem (Join-Path $RepoRoot $_) -Recurse -File -ErrorAction SilentlyContinue }
+    $inputs += $srcFiles | ForEach-Object { Get-Item (Join-Path $RepoRoot $_) -ErrorAction SilentlyContinue }
+    $newestSrc = $inputs | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     $art = Get-Item -LiteralPath $artifact
     if ($newestSrc -and $newestSrc.LastWriteTime -gt $art.LastWriteTime) {
         Add-Problem "dist\$artifactName 比源码旧（源码 $($newestSrc.Name) 改于 $($newestSrc.LastWriteTime)，产物生成于 $($art.LastWriteTime)）。去掉 -SkipBuild 重新构建。"
@@ -388,6 +399,48 @@ Write-Step "压缩"
 $zipPath = Join-Path $OutDir "$pkgName.zip"
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath -Force
+
+# 【压完要把 zip 再打开核一遍】。前面所有自检查的都是 stage 目录里的文件，
+# 而发出去的是这个 zip。压缩这一步本身也会出事（磁盘满、被杀毒软件改写、
+# 路径太长导致漏文件），结果就是"脚本说成功了，用户解开发现少东西"。
+# 核不过就把这个 zip 删掉——不留下能发的坏包。
+if (-not (Test-Path -LiteralPath $zipPath)) {
+    throw "压缩命令没报错，但 $zipPath 不存在。"
+}
+
+$expected = @(Get-ChildItem -LiteralPath $stageDir -Recurse -File |
+              ForEach-Object { $_.FullName.Substring($stageDir.Length + 1).Replace('\', '/') })
+$zipBad = @()
+try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zf = [IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        # 【两边都要归一化分隔符】。zip 规范用 /，但 PowerShell 5.1 的
+        # Compress-Archive 写进去的是 \。直接比字符串会把每一个子目录
+        # 里的文件都判成"少了"——一条永远为真的告警等于没有告警。
+        $inZip = @($zf.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+        foreach ($e in $expected) {
+            if ($inZip -notcontains $e) { $zipBad += "少了 $e" }
+        }
+        # 条目大小为 0 而源文件不是 0，说明内容没写进去
+        foreach ($entry in $zf.Entries) {
+            $src = Join-Path $stageDir ($entry.FullName.Replace('/', '\'))
+            if ((Test-Path -LiteralPath $src) -and $entry.Length -eq 0 -and (Get-Item -LiteralPath $src).Length -gt 0) {
+                $zipBad += "$($entry.FullName) 在包里是空的"
+            }
+        }
+    } finally { $zf.Dispose() }
+}
+catch { $zipBad += "zip 打不开：$($_.Exception.Message)" }
+
+if ($zipBad.Count -gt 0) {
+    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+    Write-Host ""
+    Write-Host "生成的 zip 核对不过，已删除，不要发：" -ForegroundColor Red
+    foreach ($b in $zipBad) { Write-Host "  - $b" -ForegroundColor Red }
+    exit 1
+}
+Write-Ok "zip 核对通过（$($expected.Count) 个文件都在，内容非空）"
 Write-Ok "$zipPath"
 
 #-----------------------------------------------------------------------------
