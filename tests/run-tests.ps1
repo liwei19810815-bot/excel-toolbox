@@ -191,6 +191,25 @@ try {
     Assert-Equal "hello world" $ws.Range("A1").Value2 "清除空格：压缩首尾和中间空格"
     Assert-Equal "abc def" $ws.Range("A2").Value2 "清除空格：不间断空格转普通空格"
 
+    # 【U+8000 以上的汉字必须原样保留】。这一组守的是一个真实发生过的
+    # 静默数据损坏：过滤控制字符时直接用了 AscW，而 AscW 返回带符号
+    # Integer，U+8000 以上的字符变成负数，于是被当成控制字符【删掉】。
+    # 「北辰科技」会被清洗成「北科技」，不报任何错。
+    #
+    # 原来的用例全是 ASCII，所以 283 条断言一条都没红。
+    # 这些字都在 U+8000 以上，且都是业务数据里的高频字。
+    $ws.Cells.Clear()
+    $ws.Range("A1").Value2 = " 北辰科技 "                       # 辰 U+8FB0
+    $ws.Range("A2").Value2 = "销售金额"                          # 销 U+9500 金 U+91D1 额 U+989D
+    $ws.Range("A3").Value2 = "采购部" + [char]0x00A0 + "运输费"   # 购 采 部 运 输 费 全在区间内
+    $ws.Range("A4").Value2 = "长问间题风高"                      # 连续六个 U+8000 以上
+    Select-On $ws "A1:A4"
+    $r = & $Run "text.cleanSpaces"
+    Assert-Equal "北辰科技"        $ws.Range("A1").Value2 "清除空格：U+8000 以上的汉字不能被吃掉（辰）"
+    Assert-Equal "销售金额"        $ws.Range("A2").Value2 "清除空格：高码位汉字原样保留（销/金/额）"
+    Assert-Equal "采购部 运输费"   $ws.Range("A3").Value2 "清除空格：高码位汉字之间的不间断空格正常处理"
+    Assert-Equal "长问间题风高"    $ws.Range("A4").Value2 "清除空格：连续高码位汉字一个都不能少"
+
     $ws.Cells.Clear()
     # 列必须先设成文本格式，否则 Excel 在写入时就把 "1,234.5" 和全角数字
     # 自动转成了数值，这个用例会变成【假通过】——工具根本没被执行到。
@@ -205,6 +224,37 @@ try {
     Assert-Equal 12 $ws.Range("A2").Value2 "文本转数值：处理全角数字"
     Assert-Equal "not a number" $ws.Range("A3").Value2 "文本转数值：非数字保持不变"
     $ws.Columns(1).NumberFormat = "General"
+
+    # 【选区里有公式时，纯数字文本也必须真的被转换】。
+    #
+    # 这一组守的是另一个静默失败：WriteBack 判断"值有没有变"用的是
+    # CStr(a) = CStr(b)，于是文本 "4" 和数值 4 被判成相等，跳过不写——
+    # 单元格仍旧是文本，而返回消息照样说"已处理 N 个单元格"。
+    #
+    # 它只在选区【同时含有公式】时发作：没有公式时 WriteBack 走整块
+    # 写回的快路径，不做逐格比较，一切正常。所以上面那组用例（没有公式）
+    # 永远测不出来；而且上面用的 "1,234.5" 和全角数字转成数值后字符串
+    # 形态本来就不同，即使走逐格路径也会被写回——双重巧合掩盖了这个 bug。
+    $ws.Cells.Clear()
+    $ws.Columns(1).NumberFormat = "@"
+    $ws.Range("A1").Value2 = "4"      # 【纯数字文本】：CStr 后和数值 4 一模一样
+    $ws.Range("A2").Value2 = "17"
+    $ws.Range("B1").Formula = "=A1*2" # 让选区变成"混合了公式"
+    Assert-Equal "4" $ws.Range("A1").Value2 "前置条件：写入后仍是文本"
+    Select-On $ws "A1:B2"
+    $r = & $Run "text.toNumber"
+    # 【类型必须单独断言，Assert-Equal 查不出来】。Assert-Equal 比的是
+    # "$expected" -eq "$actual"，两边都会先转成字符串——于是文本 "4" 和
+    # 数值 4 在它眼里完全相等。实测：bug 还在的时候，下面两条 Assert-Equal
+    # 照样通过，只有 -is [double] 这两条红。
+    # （这和被测代码里那个 CStr(a) = CStr(b) 是同一类错误，很讽刺。）
+    Assert-Equal 4  $ws.Range("A1").Value2 "文本转数值：选区含公式时，纯数字文本也真的转成了数值"
+    Assert-Equal 17 $ws.Range("A2").Value2 "文本转数值：选区含公式时不漏格"
+    Assert-True ($ws.Range("A1").Value2 -is [double]) "文本转数值：A1 是数值类型而不是看起来像数字的文本"
+    Assert-True ($ws.Range("A2").Value2 -is [double]) "文本转数值：A2 是数值类型而不是看起来像数字的文本"
+    Assert-Equal "=A1*2" $ws.Range("B1").Formula "文本转数值：选区里的公式没有被覆盖"
+    $ws.Columns(1).NumberFormat = "General"
+    $ws.Cells.Clear()
 
     $ws.Cells.Clear()
     $ws.Columns(1).NumberFormat = "@"

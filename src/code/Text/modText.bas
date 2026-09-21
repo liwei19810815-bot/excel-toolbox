@@ -123,11 +123,19 @@ Private Function CleanText(ByVal srcText As String) As String
     outText = Replace(outText, ChrW$(&HFEFF), "")     ' 零宽不换行空格 / BOM
     outText = Replace(outText, vbTab, " ")
 
-    ' 控制字符（含换行）一律去掉
+    ' 控制字符（含换行）一律去掉。
+    '
+    ' 【必须走 modStr.CodePointOf，不能直接写 AscW】。AscW 返回的是
+    ' 带符号 Integer，U+8000 以上的字符会变成负数，于是 "AscW(ch) >= 32"
+    ' 判定为假——那些字符被【当成控制字符静默删掉】。
+    ' 而 U+8000 以上正好是大量常用汉字：辰 说 财 货 购 路 车 运 通 部
+    ' 采 里 金 银 销 长 问 间 题 风 高 …… 实测「北辰科技」会被清洗成
+    ' 「北科技」，且不报任何错误，属于最恶劣的一类静默数据损坏。
+    ' 这个坑 README 第 6 条早就记过，这里又踩了一次。
     Dim i As Long, ch As String, buf As String
     For i = 1 To Len(outText)
         ch = Mid$(outText, i, 1)
-        If AscW(ch) >= 32 Or ch = " " Then buf = buf & ch
+        If modStr.CodePointOf(ch) >= 32 Then buf = buf & ch
     Next i
 
     ' 首尾去空格，中间连续空格压成一个

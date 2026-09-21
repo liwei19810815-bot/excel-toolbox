@@ -168,11 +168,25 @@ Public Function WriteBack(ByVal areaRng As Range, _
     WriteBack = written
 End Function
 
+' 【类型不同就必须算"不相等"】。原先只比 CStr(a) = CStr(b)，
+' 于是文本 "4" 和数值 4 被判成相等——WriteBack 跳过不写，
+' 「文本转数值」对这种单元格【完全不起作用】。
+'
+' 而它只在选区里【同时含有公式】时才发作：没有公式时 WriteBack 走
+' FromArray 整块写回的快路径，根本不做逐格比较，一切正常。
+' 一旦选区里有一列公式（很常见），就落到逐格路径上，
+' 所有"纯数字文本"全部被静默跳过。
+'
+' 最恶劣的地方是它不报错：TextToNumber 报的是【打算转换的个数】，
+' 不是实际写回的个数，所以用户看到"已处理 94 个单元格"，
+' 数据却一格没变。没有任何测试会因此变红。
 Private Function ValuesEqual(ByVal a As Variant, ByVal b As Variant) As Boolean
     If IsError(a) Or IsError(b) Then
         ValuesEqual = (IsError(a) And IsError(b))
     ElseIf IsNull(a) Or IsNull(b) Then
         ValuesEqual = (IsNull(a) And IsNull(b))
+    ElseIf VarType(a) <> VarType(b) Then
+        ValuesEqual = False
     Else
         ValuesEqual = (CStr(a) = CStr(b))
     End If

@@ -81,8 +81,14 @@ End Function
 '------------------------------------------------------------------------------
 ' 取单个字符的 Unicode 码位。
 ' AscW 返回带符号 Integer，U+8000 以上会变成负数，这里补回来。
+'
+' 【要用码位就调这个，不要自己写 AscW】。直接写 AscW 再和数字比大小，
+' 对 U+8000 以上的字符（辰、说、财、货、购、路、车、运、通、部、采、里、
+' 金、银、销、长、问、间、题、风、高……全都在这个区间）结果是负数，
+' 判断会整片出错。modText.CleanText 就这么丢过字符：
+' 「北辰科技」被清洗成「北科技」，而且不报任何错。
 '------------------------------------------------------------------------------
-Private Function CodePointOf(ByVal ch As String) As Long
+Public Function CodePointOf(ByVal ch As String) As Long
     Dim code As Long
     code = AscW(ch)
     If code < 0 Then code = code + 65536
