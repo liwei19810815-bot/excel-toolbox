@@ -59,6 +59,7 @@ $suites = @(
     @{ Name = "加载器套件";       Script = "run-tests-loader.ps1";       Kind = "count"; Slow = $true }
     @{ Name = "功能区接线与加载"; Script = "check-ribbon.ps1";           Kind = "exit" }
     @{ Name = "功能区图标";       Script = "check-imagemso.ps1";         Kind = "exit" }
+    @{ Name = "帮助覆盖与搜索";   Script = "check-help.ps1";             Kind = "exit" }
 )
 
 $results = @()

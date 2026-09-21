@@ -109,6 +109,33 @@ Fallback:
     returnedVal = False
 End Sub
 
+'------------------------------------------------------------------------------
+' 功能区搜索框「我要做什么」。
+'
+' 用户按回车时触发。命中一条就直接执行那条命令——用户打"求和是0"是想
+' 把问题解决掉，不是想读一篇文章；多一次点击就多一次放弃的机会。
+' 命中多条才打开筛选过的帮助页让他挑。
+'------------------------------------------------------------------------------
+Public Sub Ribbon_OnSearch(control As IRibbonControl, ByVal text As String)
+    On Error GoTo Fallback
+
+    Dim msg As String
+    msg = modHelp.Search(text)
+    If Len(msg) > 0 Then MsgBox msg, vbInformation, APP_NAME
+
+    ' 执行完把框清空，免得下次用户在旧词后面接着打
+    RefreshControl control.Id
+    Exit Sub
+
+Fallback:
+    MsgBox "搜索出错：" & Err.Description, vbExclamation, APP_NAME
+End Sub
+
+' 搜索框每次刷新都回到空串，用作"用完即清"
+Public Sub Ribbon_GetSearchText(control As IRibbonControl, ByRef returnedVal)
+    returnedVal = vbNullString
+End Sub
+
 '==============================================================================
 ' 刷新
 '==============================================================================

@@ -271,8 +271,22 @@
           </menu>
         </group>
 
-        <!-- ===================== 关于 ===================== -->
-        <group id="grpAbout" label="关于">
+        <!-- ===================== 帮助 ===================== -->
+        <!--
+          搜索框放在最右边，对齐 Office 自己「操作说明搜索」的位置习惯。
+          它是本选项卡里唯一不走 Ribbon_OnAction 的控件——editBox 的回调
+          签名不同（带用户输入的文本），所以单独一套 onChange / getText。
+        -->
+        <group id="grpHelp" label="帮助">
+          <editBox id="boxSearch" label="我要做什么"
+                   onChange="Ribbon_OnSearch" getText="Ribbon_GetSearchText"
+                   sizeString="WWWWWWWWWWWWWW"
+                   screentip="按你想解决的问题搜索"
+                   supertip="直接描述症状即可，例如「求和是0」「合并文件」「去重」「日期不能计算」。&#13;&#10;只匹配到一个功能时会直接执行它。"/>
+          <button id="btnHelp" tag="core.help" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="FunctionsLogicalInsertGallery" size="large"/>
           <button id="btnSelfTest" tag="core.selfTest" onAction="Ribbon_OnAction"
                   getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
                   getSupertip="Ribbon_GetSupertip"

@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AI 助手的 manifest 模板。
+
+  【这是模板，不是能直接用的 manifest】。安装脚本会替换两个占位符：
+
+      {{USER}}      当前登录用户名（已做 URL 编码）
+      {{GATEWAY}}   内网网关地址，读自同目录的 gateway.txt
+
+  为什么要按用户生成一份：Office.js 的任务窗格是沙箱网页，
+  【读不到用户名】——Excel/Word/PPT 的 Office.js 没有任何用户身份 API。
+  身份只能从外部注入，而安装脚本是以用户身份运行的，它知道 %USERNAME%。
+  所以把身份放进 SourceLocation 的查询参数里带进去。
+
+  任务窗格拿到之后向网关问 /api/ai-config?u=<用户名>：
+  命中白名单就用公司配好的模型，没命中就让用户自己配。
+  完整协议见 docs\AI接入与白名单.md。
+
+  【这是分流不是鉴权】：用户可以编辑本文件改掉 ?u=。
+  一旦那个模型涉及成本或敏感数据，必须换成网关侧的 Windows 集成认证。
+
+  发布前记得把 <Id> 换成你自己的 GUID——它是加载项的唯一标识，
+  和别人撞了会互相覆盖。
+-->
+<OfficeApp
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+  xsi:type="TaskPaneApp">
+
+  <Id>7b2e4c91-6a38-4d5f-9e10-3c8a5f2d6b47</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Excel 通用工具箱</ProviderName>
+  <DefaultLocale>zh-CN</DefaultLocale>
+  <DisplayName DefaultValue="工具箱 AI 助手"/>
+  <Description DefaultValue="在任务窗格里用自然语言操作当前工作簿。白名单用户直接用公司配好的模型，其他人可自行配置内网模型。"/>
+  <IconUrl DefaultValue="{{GATEWAY}}/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="{{GATEWAY}}/assets/icon-80.png"/>
+  <SupportUrl DefaultValue="{{GATEWAY}}/"/>
+
+  <AppDomains>
+    <AppDomain>{{GATEWAY}}</AppDomain>
+  </AppDomains>
+
+  <Hosts>
+    <Host Name="Workbook"/>
+  </Hosts>
+
+  <!-- 基线 1.1，高版本能力在运行时用 isSetSupported 探测，保证旧版 Excel 也能装 -->
+  <Requirements>
+    <Sets DefaultMinVersion="1.1">
+      <Set Name="ExcelApi" MinVersion="1.1"/>
+    </Sets>
+  </Requirements>
+
+  <!-- 身份就是靠这里的 ?u= 传进去的 -->
+  <DefaultSettings>
+    <SourceLocation DefaultValue="{{GATEWAY}}/taskpane/index.html?u={{USER}}"/>
+  </DefaultSettings>
+
+  <!-- ReadWriteDocument：读写单元格、格式、图表所必需 -->
+  <Permissions>ReadWriteDocument</Permissions>
+
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Workbook">
+        <DesktopFormFactor>
+          <FunctionFile resid="Commands.Url"/>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="grpToolboxAI">
+                <Label resid="Group.Label"/>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16"/>
+                  <bt:Image size="32" resid="Icon.32"/>
+                  <bt:Image size="80" resid="Icon.80"/>
+                </Icon>
+                <Control xsi:type="Button" id="btnToolboxAI">
+                  <Label resid="Button.Label"/>
+                  <Supertip>
+                    <Title resid="Button.Label"/>
+                    <Description resid="Button.Tip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>ToolboxAITaskpane</TaskpaneId>
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16" DefaultValue="{{GATEWAY}}/assets/icon-16.png"/>
+        <bt:Image id="Icon.32" DefaultValue="{{GATEWAY}}/assets/icon-32.png"/>
+        <bt:Image id="Icon.80" DefaultValue="{{GATEWAY}}/assets/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Commands.Url" DefaultValue="{{GATEWAY}}/commands/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="{{GATEWAY}}/taskpane/index.html?u={{USER}}"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="Group.Label" DefaultValue="工具箱 AI"/>
+        <bt:String id="Button.Label" DefaultValue="AI 助手"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="Button.Tip" DefaultValue="用自然语言让 AI 读写、整理、分析当前工作簿。"/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

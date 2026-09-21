@@ -60,6 +60,9 @@ Private Sub RegisterAll()
                    Undoable:=False, RequiresWorkbook:=False
     RegisterAction "core.about", "关于", "", _
                    Undoable:=False, RequiresWorkbook:=False
+    RegisterAction "core.help", "帮助", _
+                   "打开使用帮助：每个功能什么时候用、怎么用、有什么坑", _
+                   Undoable:=False, RequiresWorkbook:=False
     RegisterAction "core.resetEnv", "环境复位", _
                    "恢复屏幕刷新、自动重算、事件响应和状态栏。" & _
                    "宏被强行中断后如果 Excel 变得没有反应或不自动计算，点这里", _
@@ -530,8 +533,18 @@ Failed:
     ' 静默模式下把失败原因留给测试断言，不弹框
     mLastMessage = "ERROR: " & errDesc & " [" & errNum & " @ " & errSrc & "]"
     If Not mSilent Then
-        MsgBox "「" & d.Label & "」执行失败。" & tail & vbCrLf & vbCrLf & _
-               "错误 " & errNum & "：" & errDesc, vbCritical, APP_NAME
+        ' 出错是用户最需要帮助的时刻，顺手给一条路，而不是只留一个错误号。
+        ' 用 vbYesNo 而不是再加一个按钮：Excel 的 MsgBox 没法自定义按钮文字，
+        ' 把问句写清楚比按钮上写什么更重要。
+        If MsgBox("「" & d.Label & "」执行失败。" & tail & vbCrLf & vbCrLf & _
+                  "错误 " & errNum & "：" & errDesc & vbCrLf & vbCrLf & _
+                  "要查看这个功能的使用帮助吗？", _
+                  vbCritical + vbYesNo + vbDefaultButton2, APP_NAME) = vbYes Then
+            On Error Resume Next
+            modHelp.ShowFor actionId
+            Err.Clear
+            On Error GoTo 0
+        End If
     End If
 
     ' 回滚成不成功要分开记：同一个错误，回滚失败的那些才是真正会伤到数据的，
@@ -568,6 +581,7 @@ Private Function Dispatch(ByVal actionId As String) As String
         Case "core.resetEnv":  modPerf.FastModeReset
         Case "core.selfTest":  Dispatch = modApp.AboutText() & vbCrLf & vbCrLf & "加载宏工作正常。"
         Case "core.about":     Dispatch = modApp.AboutText()
+        Case "core.help":      Dispatch = modHelp.ShowAll()
 
         ' --- M1 文本与单元格 ---
         Case "text.cleanSpaces":      Dispatch = modText.CleanSpaces(Selection)

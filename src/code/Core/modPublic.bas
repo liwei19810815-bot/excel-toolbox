@@ -72,6 +72,22 @@ Public Sub Toolbox_Shutdown()
 End Sub
 
 '------------------------------------------------------------------------------
+' 帮助
+'------------------------------------------------------------------------------
+
+' 某个命令有没有帮助正文。供 tests\check-help.ps1 断言——
+' 帮助漏写不会让任何功能测试变红，必须专门检查。
+Public Function Toolbox_HasHelp(ByVal actionId As String) As Boolean
+    Toolbox_HasHelp = modHelp.HasEntry(actionId)
+End Function
+
+' 「我要做什么」搜索的【只解析不执行】版本，返回命中的 actionId（换行分隔）。
+' 测试用它断言匹配逻辑，不会真的动用户数据。
+Public Function Toolbox_ResolveHelp(ByVal query As String) As String
+    Toolbox_ResolveHelp = modHelp.Resolve(query)
+End Function
+
+'------------------------------------------------------------------------------
 ' 检查一批 imageMso 在【当前这台机器的 Excel】上是否存在。
 ' 入参用 | 分隔，返回【不存在的那些】，同样用 | 分隔；全部存在则返回空串。
 '

@@ -117,6 +117,48 @@ function Add-CustomUI([string]$xlamPath, [string]$customUiPath) {
 }
 
 #------------------------------------------------------------------------------
+# 解析 src\help\help.md
+#
+# 格式见该文件头部。这里只认三样东西：
+#   ## <actionId>     —— 一条帮助的开始
+#   关键词: ...        —— 搜索用词
+#   其余行             —— 正文（原样保留，含 ### 小标题）
+#
+# 解析不出条目时【由调用方抛错】而不是静默产出一个空帮助——
+# 帮助失效是不会让任何功能测试变红的那类问题。
+#------------------------------------------------------------------------------
+function ConvertFrom-HelpMarkdown {
+    param([string]$Path)
+
+    $lines = Get-Content -LiteralPath $Path -Encoding UTF8
+    $result = @()
+    $cur = $null
+
+    foreach ($line in $lines) {
+        if ($line -match '^##\s+([A-Za-z]+\.[A-Za-z]+)\s*$') {
+            if ($cur) { $cur.Body = ($cur.BodyLines -join "`r`n").Trim(); $result += $cur }
+            $cur = [pscustomobject]@{
+                Id        = $Matches[1]
+                Keywords  = ""
+                Body      = ""
+                BodyLines = @()
+            }
+            continue
+        }
+        if ($null -eq $cur) { continue }          # 文件头部的说明注释，跳过
+
+        if ($line -match '^关键词[:：]\s*(.+)$') {
+            $cur.Keywords = $Matches[1].Trim()
+            continue
+        }
+        $cur.BodyLines += $line
+    }
+    if ($cur) { $cur.Body = ($cur.BodyLines -join "`r`n").Trim(); $result += $cur }
+
+    return $result
+}
+
+#------------------------------------------------------------------------------
 # 主流程
 #------------------------------------------------------------------------------
 if (-not (Test-Path $CodeDir)) { throw "找不到源码目录：$CodeDir" }
@@ -201,6 +243,39 @@ try {
     }
 
     try { $wb.VBProject.Name = "ExcelToolbox" } catch { Write-Ok "VBProject 改名失败（不影响功能）" }
+
+    #--------------------------------------------------------------------------
+    # 帮助内容注入成隐藏工作表
+    #
+    # 【为什么用工作表而不是生成一个 .bas】：中文正文嵌进 VBA 字符串字面量
+    # 要处理单行长度上限、续行数上限和引号转义，很容易在某条帮助里踩雷，
+    # 而且踩了是编译错误。.xlam 本身就是工作簿，用单元格存文本没有这些限制，
+    # 也保住了"整个工具箱就一个文件"这个分发前提。
+    #--------------------------------------------------------------------------
+    $helpFile = Join-Path $RepoRoot "src\help\help.md"
+    if (Test-Path $helpFile) {
+        Write-Step "注入帮助内容"
+        $entries = ConvertFrom-HelpMarkdown $helpFile
+        if ($entries.Count -eq 0) { throw "src\help\help.md 解析不出任何条目，格式可能坏了。" }
+
+        $sh = $wb.Worksheets.Add()
+        $sh.Name = "_Help"
+        $sh.Cells(1, 1).Value2 = "actionId"
+        $sh.Cells(1, 2).Value2 = "keywords"
+        $sh.Cells(1, 3).Value2 = "body"
+
+        $r = 2
+        foreach ($e in $entries) {
+            $sh.Cells($r, 1).Value2 = $e.Id
+            $sh.Cells($r, 2).Value2 = $e.Keywords
+            $sh.Cells($r, 3).Value2 = $e.Body
+            $r++
+        }
+        # xlSheetVeryHidden = 2：用户从右键菜单取消隐藏也看不到它，
+        # 免得有人误删了导致帮助功能整个失效
+        $sh.Visible = 2
+        Write-Ok "$($entries.Count) 条帮助"
+    }
 
     Write-Step "另存为加载宏"
     $wb.IsAddin = $true

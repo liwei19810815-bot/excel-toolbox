@@ -40,7 +40,13 @@ param(
     [switch]$Install,
     [switch]$Uninstall,
     [switch]$NoTrustedLocation,
-    [string]$AddinName
+    [string]$AddinName,
+
+    # AI 助手（独立的 Office.js 加载项）。只有分发包里带了 ai\ 目录时才有意义。
+    # 【和工具箱本体是两个东西】：工具箱是 VBA 加载宏，装在本机；
+    # AI 是网页加载项，从内网地址实时加载。两者各装各的，互不依赖。
+    [switch]$WithAI,
+    [switch]$AIOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -157,41 +163,201 @@ function Get-InstalledAddins {
     return @(Get-ChildItem -LiteralPath $AddInsDir -Filter "ExcelToolbox*.xlam" -ErrorAction SilentlyContinue)
 }
 
+#-----------------------------------------------------------------------------
+# AI 助手（Office.js 加载项）
+#
+# 分发包里可选带一个 ai\ 目录：
+#     ai\manifest.template.xml   带 {{USER}} 和 {{GATEWAY}} 占位符
+#     ai\gateway.txt             一行，内网网关地址
+#     ai\ca.crt                  （可选）内网自签 CA 证书
+#
+# 没有这个目录就整段跳过——个人从 GitHub 下载的包里不会有它。
+#-----------------------------------------------------------------------------
+$AIDir        = Join-Path $Here "ai"
+$AITargetDir  = Join-Path $env:LOCALAPPDATA "ExcelToolbox\ai"
+$WefDeveloper = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
+
+function Test-AIPackagePresent {
+    return (Test-Path (Join-Path $AIDir "manifest.template.xml"))
+}
+
+# 【判据不能只看目录】。工具箱卸载会删掉整个 %LOCALAPPDATA%\ExcelToolbox，
+# 而 AI 的 manifest 就在它的子目录里。只看目录的话，删完缓存之后
+# 这里就判成"没装过"，AI 的注册表项再也没人清——Excel 会留下一个
+# 指向已不存在目录的加载项，而卸载程序永远够不着它。
+# 所以目录和注册表【任一存在】都算装过。
+function Test-AIInstalled {
+    if (Test-Path (Join-Path $AITargetDir "manifest.xml")) { return $true }
+    try {
+        $props = Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue
+        if ($props -and $props.PSObject.Properties.Name -contains $AITargetDir) { return $true }
+    } catch {}
+    return $false
+}
+
+#-----------------------------------------------------------------------------
+# 安装 AI 助手。
+#
+# 三步，都不需要管理员权限：
+#   1. 按【当前用户名】生成专属 manifest（身份靠 URL 参数传给任务窗格——
+#      Office.js 沙箱读不到用户名，只能这么注入，详见 docs\AI接入与白名单.md）
+#   2. 装内网自签 CA 到【当前用户】的受信任根存储（有 ca.crt 才做）
+#   3. 写 HKCU\...\WEF\Developer 告诉 Excel 去哪找 manifest
+#-----------------------------------------------------------------------------
+function Install-AI {
+    Step "安装 AI 助手"
+
+    $tpl = Join-Path $AIDir "manifest.template.xml"
+    if (-not (Test-Path $tpl)) { Warn "分发包里没有 ai\manifest.template.xml，跳过。"; return $false }
+
+    $gatewayFile = Join-Path $AIDir "gateway.txt"
+    if (-not (Test-Path $gatewayFile)) { Bad "缺少 ai\gateway.txt（内网网关地址）。"; return $false }
+    $gateway = (Get-Content -LiteralPath $gatewayFile -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($gateway)) { Bad "ai\gateway.txt 是空的。"; return $false }
+
+    if (-not (Test-Path $AITargetDir)) { $null = New-Item -ItemType Directory -Path $AITargetDir -Force }
+
+    # --- 1. 生成专属 manifest ---
+    #
+    # 用户名要做 URL 编码：域账号里可能有空格或中文，直接拼进 URL 会把
+    # SourceLocation 变成非法值，而 Office 遇到非法 manifest 是【静默不加载】，
+    # 用户只会看到"按钮没出现"，完全查不出原因。
+    $user = $env:USERNAME
+    $userEnc = [uri]::EscapeDataString($user)
+
+    $xml = [IO.File]::ReadAllText($tpl, [Text.UTF8Encoding]::new($false))
+    $xml = $xml.Replace("{{USER}}", $userEnc).Replace("{{GATEWAY}}", $gateway.TrimEnd('/'))
+
+    $manifest = Join-Path $AITargetDir "manifest.xml"
+    [IO.File]::WriteAllText($manifest, $xml, [Text.UTF8Encoding]::new($false))
+    Good "manifest 已生成（用户：$user）"
+
+    # --- 2. 内网 CA ---
+    $ca = Join-Path $AIDir "ca.crt"
+    if (Test-Path $ca) {
+        Say "   即将把内网 CA 证书装入【当前用户】的受信任根存储。"
+        Say "   这是为了让 Excel 信任内网的 https 地址；不装的话任务窗格会因证书错误打不开。"
+        $r = & certutil -user -addstore Root "$ca" 2>&1
+        if ($LASTEXITCODE -eq 0) { Good "CA 证书已安装" }
+        else { Warn "CA 证书安装失败，任务窗格可能因证书错误打不开：$r" }
+    }
+
+    # --- 3. 让 Excel 认识它 ---
+    try {
+        if (-not (Test-Path $WefDeveloper)) { $null = New-Item -Path $WefDeveloper -Force }
+        New-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Value $AITargetDir `
+                         -PropertyType String -Force | Out-Null
+
+        $back = (Get-ItemProperty -Path $WefDeveloper -Name $AITargetDir -ErrorAction SilentlyContinue).$AITargetDir
+        if ($back -eq $AITargetDir) { Good "已注册到 Excel" }
+        else { Warn "注册表写入后回读不一致，AI 助手可能不会出现" }
+    }
+    catch {
+        Bad "注册失败：$($_.Exception.Message)"
+        return $false
+    }
+
+    return $true
+}
+
+function Uninstall-AI {
+    Step "卸载 AI 助手"
+
+    # 注册项
+    try {
+        if (Test-Path $WefDeveloper) {
+            $props = Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue
+            if ($props -and $props.PSObject.Properties.Name -contains $AITargetDir) {
+                Remove-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Force -ErrorAction SilentlyContinue
+                Good "已从 Excel 注销"
+            } else { Good "注册项本来就不存在" }
+        } else { Good "注册项本来就不存在" }
+    }
+    catch { Warn "注销时出错：$($_.Exception.Message)" }
+
+    # manifest 目录
+    if (Test-Path $AITargetDir) {
+        Remove-Item -LiteralPath $AITargetDir -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $AITargetDir) { Warn "目录删除失败：$AITargetDir" } else { Good "已删除 $AITargetDir" }
+    } else { Good "目录本来就不存在" }
+
+    # 【CA 证书不动】——它可能是 IT 统一下发的，别的内网系统也在用。
+    # 卸载一个加载项就把公司的根证书删掉，代价远大于收益。
+    Say "   注：内网 CA 证书未删除（可能有其他内网系统在用）。"
+
+    # Office 会缓存加载项，不清的话按钮可能还在但打不开
+    $wefCache = Join-Path $env:LOCALAPPDATA "Microsoft\Office\16.0\Wef"
+    if (Test-Path $wefCache) {
+        Remove-Item "$wefCache\*" -Recurse -Force -ErrorAction SilentlyContinue
+        Good "已清理 Office 加载项缓存"
+    }
+}
+
 Say "============================================"
 Say "  Excel 通用工具箱"
 Say "============================================"
 
+if ($AIOnly) { $Install = $true }
+
 if (-not $Uninstall -and -not $Install) {
     $current = Get-InstalledAddins
+    $hasAI   = Test-AIPackagePresent
+    $aiOn    = Test-AIInstalled
 
     Say ""
-    if ($current.Count -eq 0) {
+    if ($current.Count -eq 0 -and -not $aiOn) {
         Say "当前状态：尚未安装"
         Say ""
-        Say "  [1] 安装工具箱   （直接回车即可）"
+        if ($hasAI) {
+            Say "  [1] 全部安装：工具箱 + AI 助手   （直接回车即可）"
+            Say "  [2] 只装工具箱"
+            Say "  [3] 只装 AI 助手"
+        } else {
+            Say "  [1] 安装工具箱   （直接回车即可）"
+        }
         Say "  [0] 退出"
         Say ""
         $choice = Read-Host "请输入数字后回车"
         if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
+
+        # 没带 AI 包时「1」就只是装工具箱；带了就是两个都装
+        switch ($choice.Trim()) {
+            "1" { $Install = $true; if ($hasAI) { $WithAI = $true } }
+            "2" { if ($hasAI) { $Install = $true } else { Say ""; Bad "无法识别的输入「$choice」。"; exit 1 } }
+            "3" { if ($hasAI) { $Install = $true; $AIOnly = $true; $WithAI = $true } else { Say ""; Bad "无法识别的输入「$choice」。"; exit 1 } }
+            "0" { Say ""; Say "已取消，未做任何改动。"; exit 0 }
+            default { Say ""; Bad "无法识别的输入「$choice」，未做任何改动。"; exit 1 }
+        }
+        $choice = "handled"
     }
     else {
-        Say "当前状态：已安装（$(($current.Name) -join ', ')）"
+        $state = @()
+        if ($current.Count -gt 0) { $state += "工具箱（$(($current.Name) -join ', ')）" }
+        if ($aiOn)                { $state += "AI 助手" }
+        Say "当前状态：已安装 $($state -join '、')"
         Say ""
-        Say "  [1] 重新安装 / 升级到本目录里的版本"
-        Say "  [2] 卸载工具箱"
+        Say "  [1] 重新安装 / 升级到本目录里的版本   （直接回车即可）"
+        Say "  [2] 全部卸载"
         Say "  [0] 退出"
         Say ""
         $choice = Read-Host "请输入数字后回车"
+        # 和"尚未安装"那一支保持一致：回车即默认动作。
+        # 让回车报「无法识别的输入」比重装一次糟糕得多——重装是幂等的。
+        if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
     }
 
-    switch ($choice.Trim()) {
-        "1"     { $Install = $true }
-        "2"     {
-            if ($current.Count -eq 0) { Say ""; Say "还没有安装，无需卸载。"; exit 0 }
-            $Uninstall = $true
+    if ($choice -ne "handled") {
+        switch ($choice.Trim()) {
+            "1"     { $Install = $true; if (Test-AIPackagePresent) { $WithAI = $true } }
+            "2"     {
+                if ($current.Count -eq 0 -and -not (Test-AIInstalled)) {
+                    Say ""; Say "还没有安装，无需卸载。"; exit 0
+                }
+                $Uninstall = $true
+            }
+            "0"     { Say ""; Say "已取消，未做任何改动。"; exit 0 }
+            default { Say ""; Bad "无法识别的输入「$choice」，未做任何改动。"; exit 1 }
         }
-        "0"     { Say ""; Say "已取消，未做任何改动。"; exit 0 }
-        default { Say ""; Bad "无法识别的输入「$choice」，未做任何改动。"; exit 1 }
     }
 }
 
@@ -359,6 +525,10 @@ if ($Uninstall) {
     }
     catch { Warn "移除受信任位置时出错：$($_.Exception.Message)" }
 
+    # 【AI 必须在删缓存目录之前卸】。AI 的 manifest 就在缓存目录的子目录里，
+    # 顺序反了的话这里的判据会失效，注册表项留成悬空的。
+    if (Test-AIInstalled) { Uninstall-AI }
+
     Step "删除缓存目录"
     if (Test-Path -LiteralPath $CacheDir) {
         Remove-Item -LiteralPath $CacheDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -379,6 +549,24 @@ if ($Uninstall) {
 #=============================================================================
 # 安装
 #=============================================================================
+
+# 只装 AI 时跳过工具箱本体
+if ($AIOnly) {
+    $ok = Install-AI
+    Say ""
+    Say "============================================"
+    if ($ok) {
+        Say "  AI 助手安装完成"
+        Say "============================================"
+        Say ""
+        Say "请完全关闭 Excel 再重新打开，「开始」选项卡上会出现 AI 按钮。"
+    } else {
+        Say "  AI 助手安装未完成"
+        Say "============================================"
+        exit 1
+    }
+    exit 0
+}
 
 Step "解除文件的网络锁定"
 # 从网上/邮件/共享盘来的文件带 Zone.Identifier 标记，不解除 Excel 会禁用宏。
@@ -538,6 +726,13 @@ elseif (-not $NoTrustedLocation) {
     }
 }
 
+# AI 助手放在工具箱之后装：它失败不该影响工具箱已经装好这件事
+$aiOk = $null
+if ($WithAI -and $registered) {
+    if (Test-AIPackagePresent) { $aiOk = Install-AI }
+    else { Warn "分发包里没有 ai\ 目录，跳过 AI 助手。" }
+}
+
 Say ""
 Say "============================================"
 if ($registered) {
@@ -545,6 +740,12 @@ if ($registered) {
     Say "============================================"
     Say ""
     Say "请打开 Excel，功能区上会多出一个「工具箱」选项卡。"
+    if ($aiOk -eq $true) {
+        Say "「开始」选项卡上还会出现 AI 按钮。"
+    } elseif ($aiOk -eq $false) {
+        Say ""
+        Warn "工具箱装好了，但 AI 助手没装上（原因见上面）。工具箱本身不受影响。"
+    }
     Say ""
     Say "如果没看到，通常是这两个原因之一："
     Say "  1. Excel 的宏被公司安全策略完全禁用了 —— 请联系 IT"
