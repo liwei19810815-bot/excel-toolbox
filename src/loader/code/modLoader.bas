@@ -23,7 +23,16 @@ Attribute VB_Name = "modLoader"
 '==============================================================================
 Option Explicit
 
-' 共享盘上的发布目录。部署时改这一行，或者在注册表里覆盖（见 SharePath）。
+' 共享盘上的发布目录。
+'
+' 【只能在构建时确定】：build-loader.ps1 -SharePath 会把这一行整个替换掉。
+' 加载器运行时【没有任何办法】改它——这是刻意的，不是没做完。
+'
+' 原本是打算用注册表做运行时配置的，但实测 Excel 宏里
+' CreateObject("WScript.Shell") 会被安全策略拦下（它是宏病毒的典型载体，
+' 企业 AV 和 Windows ASR 规则普遍阻止 Office 创建它），而且【失败是静默的】——
+' 在同事机器上表现为"更新莫名其妙不生效"，完全查不出原因。
+' 发布目录本来也几乎不变，不值得为它引入一条随时会被掐断的依赖。
 Private Const DEFAULT_SHARE As String = "\\server\share\ExcelToolbox"
 
 Private Const MANIFEST_NAME As String = "manifest.txt"

@@ -13,8 +13,15 @@
     不需要碰客户端。
 
 .PARAMETER SharePath
-    写进加载器的默认发布目录。不传就用源码里的 DEFAULT_SHARE，
-    部署时也可以用注册表覆盖（见 modLoader.SharePath）。
+    写进加载器的默认发布目录。不传就用源码里的 DEFAULT_SHARE。
+
+    【这是唯一的配置时机】。加载器运行时没有任何办法改这个地址——
+    原本打算用注册表做运行时配置，但实测 Excel 宏里
+    CreateObject("WScript.Shell") 会被安全策略静默拦下，
+    表现为"更新莫名其妙不生效"且查不出原因。详见 modLoader.bas 的注释。
+
+    换发布目录 = 重新构建加载器 + 每台机器重装一次加载器。
+    载荷（功能本身）的更新不受影响，那个才是天天在变的东西。
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File build\build-loader.ps1 -SharePath "\\fs01\tools\ExcelToolbox"

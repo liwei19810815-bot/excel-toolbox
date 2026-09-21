@@ -268,9 +268,35 @@ function Install-AI {
         return $false
     }
 
-    # --- 2. 内网 CA ---
+    # --- 2. 让 Excel 认识它 ---
     #
-    # 【装不上就整体失败】。原先只是告警然后继续注册，结果是
+    # 【顺序是刻意的：先注册，最后才装证书】。
+    # 原先是"先装 CA 再注册"，那样注册失败时证书已经进了用户的
+    # 受信任根存储，而我们又不该去删它（可能是 IT 统一下发的，
+    # 别的内网系统也在用）——于是必然留下"证书已受信但加载项没装上"的
+    # 半成品状态，排查成本很高。
+    # 反过来先注册：注册失败时根本还没碰证书，回滚干净。
+    $regWritten = $false
+    try {
+        if (-not (Test-Path $WefDeveloper)) { $null = New-Item -Path $WefDeveloper -Force }
+        New-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Value $AITargetDir `
+                         -PropertyType String -Force | Out-Null
+        $regWritten = $true
+
+        $back = (Get-ItemProperty -Path $WefDeveloper -Name $AITargetDir -ErrorAction SilentlyContinue).$AITargetDir
+        if ($back -ne $AITargetDir) { throw "注册表写入后回读不一致" }
+        Good "已注册到 Excel"
+    }
+    catch {
+        Bad "注册失败：$($_.Exception.Message)"
+        Undo-AIPartialInstall -RegWritten $regWritten -ManifestPath $manifest `
+                              -ManifestExistedBefore $manifestExistedBefore
+        return $false
+    }
+
+    # --- 3. 内网 CA ---
+    #
+    # 【装不上就整体失败并回滚】。放过去只告警然后继续，结果是
     # "CA 没装但加载项已注册"——用户打开 Excel 看到按钮，一点就是证书错误，
     # 比干脆没装还难排查。自签网关下 CA 是硬依赖，不该半装。
     $ca = Join-Path $AIDir "ca.crt"
@@ -282,35 +308,51 @@ function Install-AI {
             Good "CA 证书已安装"
         } else {
             Bad "CA 证书安装失败：$r"
-            Say  "     已回滚，未注册 AI 助手（避免留下「按钮能点但打不开」的状态）。"
-            if (-not $manifestExistedBefore) {
-                Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
-            }
+            Undo-AIPartialInstall -RegWritten $regWritten -ManifestPath $manifest `
+                                  -ManifestExistedBefore $manifestExistedBefore
+            Say  "     已回滚（未注册、未留下 manifest），避免「按钮能点但打不开」的状态。"
             return $false
         }
     }
 
-    # --- 3. 让 Excel 认识它 ---
-    try {
-        if (-not (Test-Path $WefDeveloper)) { $null = New-Item -Path $WefDeveloper -Force }
-        New-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Value $AITargetDir `
-                         -PropertyType String -Force | Out-Null
-
-        $back = (Get-ItemProperty -Path $WefDeveloper -Name $AITargetDir -ErrorAction SilentlyContinue).$AITargetDir
-        if ($back -ne $AITargetDir) { throw "注册表写入后回读不一致" }
-        Good "已注册到 Excel"
-    }
-    catch {
-        Bad "注册失败：$($_.Exception.Message)"
-        # 注册不上的话 manifest 留着也没用，回滚掉，别留半截状态
-        if (-not $manifestExistedBefore) {
-            Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
-            Say "     已回滚生成的 manifest。"
-        }
-        return $false
-    }
-
     return $true
+}
+
+#-----------------------------------------------------------------------------
+# 回滚一次失败的 AI 安装。
+#
+# 【注册项和 manifest 必须一起撤】。原先只删 manifest 不删注册项，
+# 留下的是最糟的状态：Excel 仍会按注册项去加载一个已经不存在的 manifest，
+# 而卸载逻辑靠"目录或注册项任一存在"判定，会把这台机器认成"装过"——
+# 用户既用不了，也说不清自己到底装没装。
+#
+# 【证书不在回滚范围内】：调用点已保证证书是最后一步，
+# 走到需要回滚时要么还没装，要么就是装证书这步自己失败的。
+# 而且 CA 可能是 IT 统一下发的，别的内网系统也在用，不能替用户删。
+#-----------------------------------------------------------------------------
+function Undo-AIPartialInstall {
+    param(
+        [bool]$RegWritten,
+        [string]$ManifestPath,
+        [bool]$ManifestExistedBefore
+    )
+
+    if ($RegWritten) {
+        try {
+            Remove-ItemProperty -Path $WefDeveloper -Name $AITargetDir -Force -ErrorAction SilentlyContinue
+            $still = (Get-ItemProperty -Path $WefDeveloper -ErrorAction SilentlyContinue)
+            if ($still -and $still.PSObject.Properties.Name -contains $AITargetDir) {
+                Warn "回滚时未能删除注册项：$AITargetDir"
+            } else {
+                Say "     已回滚注册项。"
+            }
+        } catch { Warn "回滚注册项时出错：$($_.Exception.Message)" }
+    }
+
+    if (-not $ManifestExistedBefore -and (Test-Path -LiteralPath $ManifestPath)) {
+        Remove-Item -LiteralPath $ManifestPath -Force -ErrorAction SilentlyContinue
+        Say "     已回滚生成的 manifest。"
+    }
 }
 
 function Uninstall-AI {

@@ -29,6 +29,13 @@ param(
 $ErrorActionPreference = "Continue"
 Set-StrictMode -Version Latest
 
+# 【必须设】：各套件脚本里有的把自己的输出编码设成了 UTF-8，
+# 父进程若按系统代码页（中文机器是 GBK）解码就是乱码，
+# 下面那条抓「通过 N / 失败 M」的正则匹配不到，
+# 于是那一套的断言数【静默地不计入总数】——记录看着还是全绿，
+# 数字却少了几十条。这类"安静地少算"比直接报错更难发现。
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $RepoRoot "build\_ExcelHost.ps1")
 
@@ -60,6 +67,7 @@ $suites = @(
     @{ Name = "功能区接线与加载"; Script = "check-ribbon.ps1";           Kind = "exit" }
     @{ Name = "功能区图标";       Script = "check-imagemso.ps1";         Kind = "exit" }
     @{ Name = "帮助覆盖与搜索";   Script = "check-help.ps1";             Kind = "exit" }
+    @{ Name = "安装器";           Script = "check-installer.ps1";        Kind = "count" }
 )
 
 $results = @()
@@ -85,6 +93,12 @@ foreach ($s in $suites) {
             $passed = $Matches[1]
             $failed = $Matches[2]
             $totalAssertions += [int]$passed
+        } else {
+            # 【抓不到就必须喊出来】。默默留空的话，那一套的几十条断言
+            # 会安静地不计入总数，而记录看上去仍然全绿——
+            # 这正是本记录要消灭的那种"看着可信实际没核对过"的情况。
+            Write-Host "    警告：抓不到「通过 N / 失败 M」，该套件断言数未计入总数" -ForegroundColor DarkYellow
+            $anyFailed = $true
         }
     }
 
