@@ -124,10 +124,14 @@ try {
             # 无差别重试会降低敏感度：一个真实故障如果在这 24 秒里
             # 偶然自愈，测试就变绿了——等于用等待把问题盖住。
             #
-            # 这三个才是 Office 自动化里"等一下就好"的那一族：
+            # 这几个才是 Office 自动化里"等一下就好"的那一族：
             #     0x80010001 RPC_E_CALL_REJECTED
             #     0x8001010A RPC_E_SERVERCALL_RETRYLATER
             #     0x8001010B RPC_E_SERVERCALL_REJECTED
+            #     0x800AC472 VBA_E_IGNORE —— Excel 专有。对象模型被挂起时
+            #                （正在加载加载宏、单元格处于编辑态、有模态框）
+            #                调用就返回它。本套件恰恰是在加载宏刚装上、
+            #                功能区还没建好的时候轮询，最容易撞上这个。
             # 【不要把 0x8001010D 算进来】：那是
             # RPC_E_CANTCALLOUT_ININPUTSYNCCALL，属于调用上下文错误，
             # 不是瞬时忙——重试它只会把一个真错误拖够 24 秒再报。
@@ -135,7 +139,7 @@ try {
             # 【比较可以直接用十六进制字面量】：PowerShell 把 0x8001010A
             # 解析成 Int32 -2147417846，和 COM 异常里带符号的 HResult
             # 正好一致。反过来写成 [uint32]$hr 才会炸（负数转不过去）。
-            $retryable = @(0x80010001, 0x8001010A, 0x8001010B)
+            $retryable = @(0x80010001, 0x8001010A, 0x8001010B, 0x800AC472)
 
             $hr = 0
             try { $hr = $_.Exception.InnerException.HResult } catch {}
@@ -144,7 +148,7 @@ try {
             $busy = ($retryable -contains $hr)
             if (-not $busy) {
                 # HResult 取不到时退回看文本（本地化消息里通常带着十六进制码）
-                foreach ($code in @("0x80010001", "0x8001010A", "0x8001010B")) {
+                foreach ($code in @("0x80010001", "0x8001010A", "0x8001010B", "0x800AC472")) {
                     if ($_.Exception.Message -like "*$code*") { $busy = $true; break }
                 }
             }
