@@ -245,20 +245,51 @@ Public Function ScrubPaths(ByVal src As String) As String
     s = ReplaceQuoted(s, """", """")
     s = ReplaceQuoted(s, ChrW$(&H300C), ChrW$(&H300D))   ' 「」
 
-    ' 再逐词扫，抓漏网的裸路径和裸文件名
-    Dim words() As String, i As Long
-    words = Split(s, " ")
-    For i = LBound(words) To UBound(words)
-        If LooksLikePath(words(i)) Then words(i) = "<path>"
-    Next i
-
-    ScrubPaths = Join(words, " ")
+    ' 再逐词扫，抓漏网的裸路径和裸文件名。
+    '
+    ' 【不能只按空格切词】。中文句子里没有空格：
+    ' "打开 报价单.xlsx，失败" 按空格切出来的是「报价单.xlsx，失败」整块，
+    ' 扩展名判据取到的是 "xlsx，失败"，长度超限，路径就漏出去了。
+    ' 所以要把中文标点也当分隔符，同时【把分隔符原样保留】，
+    ' 免得清洗完的句子变成一串没法读的碎片。
+    ScrubPaths = ScrubTokens(s)
     Exit Function
 
 Failed:
     ' 清洗本身出错时【不要把原文放出去】——那正是要防的东西
     Err.Clear
     ScrubPaths = "<scrub-failed>"
+End Function
+
+'------------------------------------------------------------------------------
+' 逐字符走一遍：遇到分隔符就把攒下的词判一次，分隔符原样输出。
+'
+' 分隔符包含空格和中英文标点——中文没有词间空格，只按空格切会把
+' 「报价单.xlsx，失败」当成一个词，判据全都失效。
+'------------------------------------------------------------------------------
+Private Function ScrubTokens(ByVal src As String) As String
+    Dim delims As String
+    delims = Delimiters()
+
+    Dim out As String, word As String
+    Dim i As Long, ch As String
+
+    For i = 1 To Len(src)
+        ch = Mid$(src, i, 1)
+        If InStr(delims, ch) > 0 Then
+            out = out & FlushWord(word) & ch
+            word = vbNullString
+        Else
+            word = word & ch
+        End If
+    Next i
+
+    ScrubTokens = out & FlushWord(word)
+End Function
+
+Private Function FlushWord(ByVal w As String) As String
+    If Len(w) = 0 Then Exit Function
+    If LooksLikePath(w) Then FlushWord = "<path>" Else FlushWord = w
 End Function
 
 Private Function ReplaceQuoted(ByVal src As String, _
@@ -282,20 +313,88 @@ Private Function ReplaceQuoted(ByVal src As String, _
 End Function
 
 Private Function LooksLikePath(ByVal w As String) As Boolean
-    If Len(w) = 0 Then Exit Function
+    Dim t As String
+    t = StripEdgePunctuation(w)
+    If Len(t) = 0 Then Exit Function
 
-    If InStr(w, "\") > 0 Then LooksLikePath = True: Exit Function
-    If InStr(w, "/") > 0 Then LooksLikePath = True: Exit Function
+    ' 含路径分隔符
+    If InStr(t, "\") > 0 Then LooksLikePath = True: Exit Function
+    If InStr(t, "/") > 0 Then LooksLikePath = True: Exit Function
+
+    ' 环境变量形式的路径：%TEMP% / %LOCALAPPDATA%\...
+    ' 【没有斜杠也没有扩展名】，前一版的三条判据全都抓不到它
+    If Len(t) >= 3 Then
+        If Left$(t, 1) = "%" And InStr(2, t, "%") > 0 Then LooksLikePath = True: Exit Function
+    End If
+
+    ' 盘符开头：C:something。同样可能不含斜杠
+    If Len(t) >= 2 Then
+        If Mid$(t, 2, 1) = ":" And IsAllLetters(Left$(t, 1)) Then LooksLikePath = True: Exit Function
+    End If
 
     ' 形如 name.ext：点号后面跟 1-5 个字母，且点号不在首尾
     Dim dotPos As Long, extPart As String
-    dotPos = InStrRev(w, ".")
-    If dotPos > 1 And dotPos < Len(w) Then
-        extPart = Mid$(w, dotPos + 1)
+    dotPos = InStrRev(t, ".")
+    If dotPos > 1 And dotPos < Len(t) Then
+        extPart = Mid$(t, dotPos + 1)
         If Len(extPart) >= 1 And Len(extPart) <= 5 Then
             If IsAllLetters(extPart) Then LooksLikePath = True
         End If
     End If
+End Function
+
+'------------------------------------------------------------------------------
+' 去掉词两端的标点再判断。
+'
+' 【不这么做会漏判】：错误描述里的文件名常常紧跟标点——
+' "打开 report.xlsx，失败" 或 "(见 report.xlsx)"，
+' 那个词实际是 "report.xlsx，" 或 "report.xlsx)"，
+' 扩展名判据里的 IsAllLetters 会因为末尾的标点而失败，路径就漏出去了。
+'------------------------------------------------------------------------------
+'------------------------------------------------------------------------------
+' 这里有两个【必须分开】的字符集。混用过一次，结果是路径反而漏得更多。
+'
+'   Delimiters   —— 词的边界。【绝不能包含 . : \ / % - _】，
+'                   那些是路径本身的组成部分。把 "." 当分隔符的话，
+'                   "机密.xlsx" 会被切成「机密」「.」「xlsx」三段，
+'                   扩展名判据再也看不到完整文件名。
+'
+'   EdgePunctuation —— 词两端要剥掉的标点。这个【可以】包含 . 和 :，
+'                   因为句末的 "见 report.xlsx." 那个点不属于文件名。
+'
+' 【都不能写成 Const】：VBA 的 Const 要求编译期常量表达式，出现 ChrW$()
+' 这样的函数调用是非法的——而且这个错误【整工程编译抓不到】，
+' 要等真的调用到才炸，炸的形式是 VBE 弹中断模式模态框，
+' 在无界面运行的测试里就是永久挂死。本轮实实在在挂了一次。
+' 需要非 ASCII 字符的"常量"一律用函数返回。
+'------------------------------------------------------------------------------
+Private Function Delimiters() As String
+    Delimiters = " " & vbTab & "()[]{}<>,;!?""'" & _
+                 "、，。；！？（）【】《》" & _
+                 ChrW$(&H300C) & ChrW$(&H300D)
+End Function
+
+Private Function EdgePunctuation() As String
+    EdgePunctuation = Delimiters() & ".:："
+End Function
+
+Private Function StripEdgePunctuation(ByVal w As String) As String
+    Dim PUNCT As String
+    PUNCT = EdgePunctuation()
+
+    Dim s As String
+    s = w
+
+    Do While Len(s) > 0
+        If InStr(PUNCT, Right$(s, 1)) = 0 Then Exit Do
+        s = Left$(s, Len(s) - 1)
+    Loop
+    Do While Len(s) > 0
+        If InStr(PUNCT, Left$(s, 1)) = 0 Then Exit Do
+        s = Mid$(s, 2)
+    Loop
+
+    StripEdgePunctuation = s
 End Function
 
 Private Function IsAllLetters(ByVal txt As String) As Boolean
@@ -412,27 +511,36 @@ Private Sub PruneBuffer()
     If fso Is Nothing Then Exit Sub
     If Not fso.FolderExists(BufferDir()) Then Exit Sub
 
-    Dim f As Object, total As Double
+    ' 【只动自己的文件】。第一版直接遍历目录里【所有】文件按时间删，
+    ' 目录里万一混进别的东西（用户放的、别的程序写的）就被误删了。
+    ' 删文件是不可逆的，范围必须收紧到自己的命名规则之内。
+    Dim names As Collection
+    Set names = ListBufferFiles(fso)
+    If names Is Nothing Then Exit Sub
+    If names.Count = 0 Then Exit Sub
+
+    Dim i As Long, f As Object, p As String, total As Double
 
     ' 第一遍：删过期的，顺便统计剩下的总量
-    For Each f In fso.GetFolder(BufferDir()).Files
+    For i = 1 To names.Count
+        p = BufferDir() & "\" & names(i)
+        If Not fso.FileExists(p) Then GoTo NextPrune
+        Set f = fso.GetFile(p)
+
         If DateDiff("d", f.DateLastModified, Now) > MAX_BUFFER_DAYS Then
             Err.Clear
-            fso.DeleteFile f.Path, True
+            fso.DeleteFile p, True
             Err.Clear
         Else
             total = total + f.Size
         End If
-    Next f
+NextPrune:
+    Next i
 
     If total <= MAX_BUFFER_BYTES Then Exit Sub
 
     ' 第二遍：仍然超量，从最旧的开始删到达标为止。
-    Dim names As Collection
-    Set names = ListBufferFiles(fso)
-    If names Is Nothing Then Exit Sub
-
-    Dim i As Long, p As String
+    ' names 已按文件名（即日期）排好序，从头删就是从最旧的删。
     For i = 1 To names.Count
         If total <= MAX_BUFFER_BYTES Then Exit For
         p = BufferDir() & "\" & names(i)

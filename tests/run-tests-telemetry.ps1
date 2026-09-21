@@ -193,6 +193,11 @@ try {
         @{ In = "找不到 C:\Users\zhangsan\Desktop\report.csv"; Bad = @('zhangsan','Desktop','report','csv') }
         @{ In = "打开 机密数据.xlsx 失败";                     Bad = @('机密数据','xlsx') }
         @{ In = "「客户名单.docx」已损坏";                     Bad = @('客户名单','docx') }
+        # 以下几种是复验时发现会漏掉的形态，各补一条守着
+        @{ In = "打开 报价单.xlsx，失败";                      Bad = @('报价单','xlsx') }   # 尾随中文标点
+        @{ In = "(见 汇总表.xlsb) 第 3 行";                    Bad = @('汇总表','xlsb') }   # 括号包裹
+        @{ In = "临时目录 %LOCALAPPDATA%Temp 不可写";          Bad = @('LOCALAPPDATA') }    # 环境变量形式
+        @{ In = "路径 D:项目资料 无效";                        Bad = @('项目资料') }        # 裸盘符无斜杠
     )
 
     foreach ($c in $cases) {
