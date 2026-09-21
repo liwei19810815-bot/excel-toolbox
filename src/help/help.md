@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   工具箱帮助正文。
 
   格式（构建脚本按这个解析，别改结构）：
@@ -148,7 +148,7 @@
 点一下，会显示版本号、宿主 Excel 版本、位数、已注册命令数。
 ### 示例
 向 IT 报问题时被问「你装的是哪个版本」。
-点自检 → 看到 `OK|ExcelToolbox|1.1.0|host=Microsoft Excel|bitness=64 位|actions=60`，截图发过去即可。
+点自检 → 看到 `OK|ExcelToolbox|1.1.2|host=Microsoft Excel|bitness=64 位|actions=60`，截图发过去即可。
 ### 注意
 把这一行完整截图发给 IT，排查会快很多。
 

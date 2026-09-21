@@ -1,4 +1,4 @@
-Attribute VB_Name = "modApp"
+﻿Attribute VB_Name = "modApp"
 '==============================================================================
 ' modApp - 加载宏全局入口与环境信息
 '
@@ -10,7 +10,7 @@ Option Private Module
 
 Public Const APP_NAME As String = "Excel 通用工具箱"
 Public Const APP_ID As String = "ExcelToolbox"
-Public Const APP_VERSION As String = "1.1.0"
+Public Const APP_VERSION As String = "1.1.2"
 
 ' 宿主类型
 Public Enum HostKind
