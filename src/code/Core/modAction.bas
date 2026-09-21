@@ -373,25 +373,38 @@ End Function
 Public Sub RunAction(ByVal actionId As String)
     mLastMessage = vbNullString
 
+    ' 遥测计时。用 Timer 而不是 Now：Now 的分辨率是秒，大部分命令测出来都是 0。
+    ' 【Timer 在午夜会回绕】，所以下面取耗时时要处理负数。
+    Dim startedAt As Single
+    startedAt = Timer
+
     Dim d As clsActionDef
     Set d = GetAction(actionId)
     If d Is Nothing Then
         Notify "命令未注册：" & actionId, vbExclamation
+        modTelemetry.TrackAction actionId, "blocked", 0
         Exit Sub
     End If
 
     ' --- 前置校验 ---
+    '
+    ' 这几条被拦下的路径【也要记遥测】，而且很有价值：
+    ' 「请先选中区域」如果某个命令上出现得特别频繁，说明它的适用条件
+    ' 没跟用户讲清楚，那是产品问题不是用户问题。只记成功次数就看不到这些。
     If modApp.IsWps And Not d.SupportedInWps Then
         Notify "「" & d.Label & "」在 WPS 下不可用。", vbInformation
+        modTelemetry.TrackAction actionId, "blocked_wps", ElapsedMs(startedAt)
         Exit Sub
     End If
     If d.RequiresWorkbook And ActiveWorkbook Is Nothing Then
         Notify "请先打开一个工作簿。", vbInformation
+        modTelemetry.TrackAction actionId, "blocked_nodoc", ElapsedMs(startedAt)
         Exit Sub
     End If
     If d.RequiresSelection Then
         If TypeName(Selection) <> "Range" Then
             Notify "请先选中要处理的单元格区域。", vbInformation
+            modTelemetry.TrackAction actionId, "blocked_nosel", ElapsedMs(startedAt)
             Exit Sub
         End If
     End If
@@ -402,6 +415,7 @@ Public Sub RunAction(ByVal actionId As String)
         If MsgBox("「" & d.Label & "」执行后无法撤销。" & vbCrLf & vbCrLf & _
                   "建议先保存或备份当前文件。是否继续？", _
                   vbExclamation + vbYesNo + vbDefaultButton2, APP_NAME) <> vbYes Then
+            modTelemetry.TrackAction actionId, "declined", ElapsedMs(startedAt)
             Exit Sub
         End If
     End If
@@ -438,6 +452,8 @@ Public Sub RunAction(ByVal actionId As String)
         If Len(result) > 0 Then result = result & vbCrLf & vbCrLf & undoWarning Else result = undoWarning
     End If
     If Len(result) > 0 Then Notify result, vbInformation
+
+    modTelemetry.TrackAction actionId, "ok", ElapsedMs(startedAt)
     Exit Sub
 
 Failed:
@@ -470,10 +486,14 @@ Failed:
 
         If cancelRollbackOk Then
             mLastMessage = "CANCELLED"
+            modTelemetry.TrackAction actionId, "cancel", ElapsedMs(startedAt)
         Else
             mLastMessage = "CANCELLED_ROLLBACK_FAILED"
             Notify "「" & d.Label & "」已取消，但【回滚失败】。" & vbCrLf & vbCrLf & _
                    "数据可能停在中间状态，请立即检查，必要时关闭文件不保存。", vbCritical
+            ' 回滚失败是最需要 IT 立刻知道的一类事件，单列一个 outcome 便于告警
+            modTelemetry.TrackAction actionId, "cancel_rollback_failed", _
+                                      ElapsedMs(startedAt), errNum, errDesc
         End If
         Exit Sub
     End If
@@ -513,7 +533,27 @@ Failed:
         MsgBox "「" & d.Label & "」执行失败。" & tail & vbCrLf & vbCrLf & _
                "错误 " & errNum & "：" & errDesc, vbCritical, APP_NAME
     End If
+
+    ' 回滚成不成功要分开记：同一个错误，回滚失败的那些才是真正会伤到数据的，
+    ' 混在一起统计就分不出轻重缓急了。
+    modTelemetry.TrackAction actionId, _
+                             IIf(txOpened And Not rollbackOk, "fail_rollback_failed", "fail"), _
+                             ElapsedMs(startedAt), errNum, errDesc & " @ " & errSrc
 End Sub
+
+'------------------------------------------------------------------------------
+' Timer 起点到现在的毫秒数。
+'
+' 【Timer 在午夜会归零】，跨零点执行的命令会算出负数。
+' 那种情况下返回 0 而不是一个荒谬的负值——遥测里出现负耗时，
+' 会让后面做统计的人白白花时间去查一个不存在的 bug。
+'------------------------------------------------------------------------------
+Private Function ElapsedMs(ByVal startedAt As Single) As Long
+    Dim secs As Single
+    secs = Timer - startedAt
+    If secs < 0 Then Exit Function
+    ElapsedMs = CLng(secs * 1000)
+End Function
 
 '------------------------------------------------------------------------------
 ' actionId -> 业务过程。这是全加载宏唯一的转派点。

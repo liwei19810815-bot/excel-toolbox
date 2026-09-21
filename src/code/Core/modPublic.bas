@@ -42,6 +42,24 @@ Public Sub Toolbox_ResetCaps()
 End Sub
 
 '------------------------------------------------------------------------------
+' 遥测状态。不含任何用户数据，可以直接截图发给 IT 排障。
+'------------------------------------------------------------------------------
+Public Function Toolbox_TelemetryStatus() As String
+    Toolbox_TelemetryStatus = modTelemetry.Status()
+End Function
+
+' 供回归测试配置遥测（端点、开关），免得测试去动真实配置
+Public Sub Toolbox_SetTelemetry(ByVal enabled As Boolean, ByVal endpoint As String)
+    modSettings.PutSetting "TelemetryEnabled", enabled
+    modSettings.PutSetting "TelemetryEndpoint", endpoint
+End Sub
+
+' 立刻把缓冲冲出去。测试用来验证"上报成功才删本地文件"。
+Public Sub Toolbox_FlushTelemetry()
+    modTelemetry.FlushOnShutdown
+End Sub
+
+'------------------------------------------------------------------------------
 ' 检查一批 imageMso 在【当前这台机器的 Excel】上是否存在。
 ' 入参用 | 分隔，返回【不存在的那些】，同样用 | 分隔；全部存在则返回空串。
 '

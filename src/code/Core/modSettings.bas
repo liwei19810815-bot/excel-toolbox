@@ -31,6 +31,10 @@ Private Function ReadRaw(ByVal key As String, ByVal defaultValue As String) As S
     On Error GoTo 0
 End Function
 
+Public Function GetSettingString(ByVal key As String, ByVal defaultValue As String) As String
+    GetSettingString = ReadRaw(key, defaultValue)
+End Function
+
 Public Function GetSettingLong(ByVal key As String, ByVal defaultValue As Long) As Long
     Dim s As String
     s = ReadRaw(key, CStr(defaultValue))

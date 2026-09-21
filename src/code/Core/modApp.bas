@@ -27,6 +27,14 @@ Private mInitialized As Boolean
 Public Sub App_Startup()
     If mInitialized Then Exit Sub
     mInitialized = True
+
+    ' 把上一次会话攒下的遥测发出去。
+    ' 包在错误保护里：遥测的任何问题都不允许挡住加载宏启动——
+    ' 启动失败意味着 59 个命令一个都用不了，而遥测只是给 IT 看的。
+    On Error Resume Next
+    modTelemetry.FlushOnStartup
+    Err.Clear
+    On Error GoTo 0
 End Sub
 
 '------------------------------------------------------------------------------
@@ -42,6 +50,7 @@ Public Sub App_Shutdown()
     modSpotlight.Cleanup      ' 先摘事件钩子并清掉条件格式，别把它残留在用户文件里
     modUndo.Cleanup
     modPerf.FastModeReset
+    modTelemetry.FlushOnShutdown   ' 发不出去也无所谓，缓冲还在，下次启动再试
     On Error GoTo 0
 End Sub
 
