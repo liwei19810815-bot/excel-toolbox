@@ -155,7 +155,10 @@ Office.js 要求任务窗格的 `SourceLocation` 必须是 **https**（`localhos
 几条实现上的决定，都写在代码注释里：
 
 - **网关挂了不能让任务窗格不能用**。超时 3 秒，所有失败一律安静退回
-  `byok`，界面先挂出来再异步问配置，绝不让用户对着转圈的空界面。
+  `byok`，用户自己填地址照样能用。
+  （最初是"界面先挂出来再异步问配置"，为的是不让人对着转圈；
+  但那样会在配置到位之前放行，治理开关被绕过。现在改成
+  问完才放行，等待上限就是那 3 秒。）
 - **managed 的配置不落 localStorage**。IT 下发的地址和 key 只活在内存里，
   每次打开重新问网关。否则把人移出白名单之后，他本机还留着一份能用的
   配置，管控就是假的。
@@ -230,30 +233,16 @@ map $arg_u $ai_mode {
 
 ---
 
-## 任务窗格侧要改什么（`Excel AI` 项目）
+## 任务窗格侧（`Excel AI` 项目）
 
-**本仓库不包含这部分**，它属于 `Excel AI` 项目。需要的改动很小：
+**本仓库不包含这部分代码**，它在 `Excel AI` 项目里，**已经实现**，
+清单见上面的「参考实现在哪」。这里只记几条实现时定下来、不要再改回去的事：
 
-1. 启动时读 URL 参数并拉配置：
+1. **问完网关才放行**。不是"先挂界面、后台异步问"——那样会在配置到位之前
+   放行，可见性开关形同虚设。
 
-```ts
-// src/taskpane/main.tsx 启动处
-const u = new URLSearchParams(location.search).get('u') ?? '';
-const cfg = await fetch(`/api/ai-config?u=${encodeURIComponent(u)}`)
-  .then(r => r.json())
-  .catch(() => ({ mode: 'byok' }));          // 网关挂了就退回自配置，别让用户卡在白屏
-
-if (cfg.mode === 'managed') {
-  useSettings.getState().set({
-    kind: 'openai-compatible',
-    baseUrl: cfg.baseUrl,
-    model: cfg.model,
-    apiKey: cfg.apiKey,
-  });
-}
-```
-
-2. `managed` 模式下把设置页的接口地址/模型/Key 三项设为只读，并显示 `notice`。
+2. `managed` 模式下设置页的接口地址/模型/Key 设为只读，
+   **并且堵掉"导入配置"这条绕过路径**（锁了输入框却留着导入口子等于没锁）。
    **不要整个隐藏设置页**——用户仍然需要看到"我现在用的是哪个模型"。
 
 3. `PRESETS` 里的 `intranet` 项保留，给 `byok` 用户当模板
@@ -262,6 +251,13 @@ if (cfg.mode === 'managed') {
 4. `testConnection()` **必须保留**。它会真发一次带工具的请求验证模型支持
    **function calling**——不支持工具调用的模型没法操作文档，
    等用户实际对话时才发现就太晚了。
+
+5. **`Excel AI/install/` 下那两个旧脚本已作废并改成拒绝执行。**
+   旧的 `安装.bat` 会装根证书，而且注册的公共 manifest 里没有 `?u=`，
+   用它装出来的客户端白名单分流**整个失效且不报错**；
+   旧的 `卸载.bat` 会 `rd /s /q` 整个 `Wef` 缓存目录，
+   那是**所有 Office.js 加载项共用**的，删掉会波及别的加载项。
+   AI 的安装统一走工具箱的一键安装包。
 
 ---
 
