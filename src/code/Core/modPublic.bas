@@ -56,6 +56,18 @@ End Sub
 
 ' 立刻把缓冲冲出去。测试用来验证"上报成功才删本地文件"。
 Public Sub Toolbox_FlushTelemetry()
+    modTelemetry.ForceFlush
+End Sub
+
+' 路径清洗的直接入口。供测试逐条验证"错误描述里的路径确实被抹掉了"——
+' 这是使用说明里对员工的承诺，必须能单独断言，不能只靠端到端碰运气。
+Public Function Toolbox_ScrubPaths(ByVal src As String) As String
+    Toolbox_ScrubPaths = modTelemetry.ScrubPaths(src)
+End Function
+
+' 走一遍关闭时的遥测路径。供测试验证"端点已知挂掉时关闭不再白等一个超时"——
+' 那是用户唯一会感知到遥测存在的时刻，必须有断言守着。
+Public Sub Toolbox_Shutdown()
     modTelemetry.FlushOnShutdown
 End Sub
 

@@ -180,6 +180,32 @@ try {
     Assert-True ($body -notlike "*  y  *")  "上报内容不含单元格数据"
 
     #=========================================================================
+    Section "路径清洗：承诺「不采集文件名/路径」必须在代码层面成立"
+
+    # Excel 的错误描述里经常自带完整路径，而我们在使用说明里向员工承诺了
+    # 不采集文件名和路径。光说"我们没主动读路径"不够——错误描述是 Excel 给的，
+    # 里面有什么不由我们决定。这几条就是守住那句承诺的。
+    $Scrub = { param($s) $xl.Run("'$OutputName'!Toolbox_ScrubPaths", $s) }
+
+    $cases = @(
+        @{ In = "无法访问 'D:\财务\2026年薪资.xlsx'";        Bad = @('财务','薪资','xlsx','D:') }
+        @{ In = '文件 "\\fs01\share\预算.xlsm" 被占用';        Bad = @('fs01','share','预算','xlsm') }
+        @{ In = "找不到 C:\Users\zhangsan\Desktop\report.csv"; Bad = @('zhangsan','Desktop','report','csv') }
+        @{ In = "打开 机密数据.xlsx 失败";                     Bad = @('机密数据','xlsx') }
+        @{ In = "「客户名单.docx」已损坏";                     Bad = @('客户名单','docx') }
+    )
+
+    foreach ($c in $cases) {
+        $out = & $Scrub $c.In
+        $leaked = @($c.Bad | Where-Object { "$out" -like "*$_*" })
+        Assert-Equal 0 $leaked.Count "清洗「$($c.In)」后不含敏感片段（残留：$($leaked -join ', ')）"
+    }
+
+    # 反向：正常的错误信息不该被抹成一片空白，否则 IT 没法按错误聚类
+    $plain = & $Scrub "类型不匹配"
+    Assert-Match $plain "*类型不匹配*" "不含路径的错误描述保持原样"
+
+    #=========================================================================
     Section "端点挂掉：命令照常执行（最关键的一条）"
 
     Stop-Collector
@@ -208,6 +234,21 @@ try {
     $null = $xl.Run("'$OutputName'!Toolbox_FlushTelemetry")
     Start-Sleep -Milliseconds 500
     Assert-Equal 1 (Buffer-FileCount) "上报失败时【不删】本地文件"
+
+    #=========================================================================
+    Section "关闭 Excel 时不再白等一次（端点已知挂掉）"
+
+    # 启动时就发不出去的话，关闭时不该再试——网络不会因为用户点了关闭按钮
+    # 就恢复，再试一次只是让 Excel 多卡一个超时。那正是用户最不耐烦、
+    # 也最容易把锅扣到插件头上的时刻。
+    #
+    # 上一节的 FlushTelemetry 已经把「本会话端点已死」置位了，
+    # 所以这次走 App_Shutdown 的那条路径应该立刻返回。
+    $sw2 = [Diagnostics.Stopwatch]::StartNew()
+    $null = $xl.Run("'$OutputName'!Toolbox_Shutdown")
+    $sw2.Stop()
+    Assert-True ($sw2.ElapsedMilliseconds -lt 500) "端点已知挂掉时，关闭路径不产生网络等待（实测 $($sw2.ElapsedMilliseconds)ms）"
+    Assert-Equal 1 (Buffer-FileCount) "跳过重试不等于丢数据，缓冲仍在"
 
     #=========================================================================
     Section "恢复后重传"
