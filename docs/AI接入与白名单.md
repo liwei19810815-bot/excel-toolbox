@@ -128,6 +128,12 @@ Office.js 要求任务窗格的 `SourceLocation` 必须是 **https**（`localhos
 **真正的强制落在任务窗格里**：`visibility !== 1` 时 `ChatPane` 直接不渲染
 聊天界面，只显示"已停用"。无论用户怎么点进来都绕不过去。
 
+**问到网关之前一律不放行。** 一开始的实现是"界面先挂出来、配置在后台异步问、
+默认按可用处理"——那留出了一个窗口：服务端已经关掉了功能，用户却能在
+那几百毫秒里正常发消息，开关被绕过（Codex 评审发现）。
+现在 `provision.status` 初始是 `pending`，期间窗格只显示"正在获取配置"，
+问完才放行。等待上限就是 3 秒超时，网关不可达也会在 3 秒内落到"可用"。
+
 **网关问不到时一律按 `1`（可用）处理。** 这是治理开关，不是安全闸：
 网关抖一下就让全公司用不了 AI、让新员工装不上，代价比"多开了一会儿"
 大得多。要强管控就用 `0`，它在安装侧是硬卡死的。
@@ -143,7 +149,7 @@ Office.js 要求任务窗格的 `SourceLocation` 必须是 **https**（`localhos
 | `server/managed.json` | 命中白名单时下发的模型配置 |
 | `server/nginx.conf.sample` | 生产部署样例（由 nginx 终止 https） |
 | `src/store/provisioning.ts` | 任务窗格侧：读 `?u=` → 问网关 → 应用或退回 byok |
-| `src/store/provisioning.test.ts` | 25 条断言，含网关 500 / 畸形返回 / 断网 / 超时 / 三态可见性 |
+| `src/store/provisioning.test.ts` | 28 条断言，含网关 500 / 畸形返回 / 断网 / 超时 / 三态可见性 / 未就绪不放行 |
 | `server/feature.json` | 可见性开关（全局 + 按账号例外） |
 
 几条实现上的决定，都写在代码注释里：
