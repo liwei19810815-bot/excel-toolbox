@@ -243,6 +243,50 @@ try {
     }
 
     #-------------------------------------------------------------------------
+    # 交互链：点分组 / 点功能 / 搜索 / 体检 / 定位条目
+    #
+    # 【"控件建得出来"证明不了"点下去有反应"】。运行时控件的事件接不到
+    # 窗体代码模块上，全靠 clsPaneCtl 那层 WithEvents 包装；
+    # 那层被改坏的表现是窗体照弹、控件都在、点谁都没反应，且不报错。
+    #-------------------------------------------------------------------------
+    Write-Host "==> 侧边栏交互链" -ForegroundColor Cyan
+    $drive = $xl.Run("'$OutputName'!Toolbox_HelpPaneDrive")
+    if ($drive -notlike 'OK|*') {
+        $bad += "侧边栏交互链失败：$drive"
+    } else {
+        $checks = @(
+            @{ Pat = 'items=([1-9]\d*)';  Msg = "点分组后功能列表是空的（分组 Click 事件没接上）" }
+            @{ Pat = 'bodyLen=([1-9]\d*)'; Msg = "点功能后正文是空的（功能 Click 事件没接上）" }
+            @{ Pat = 'search=True';        Msg = "搜索「求和是0」没命中文本转数值" }
+            @{ Pat = 'env=True';           Msg = "体检按钮没出报告" }
+            @{ Pat = 'entry=True';         Msg = "定位到 misc.parseId 失败（ShowEntry 跨分组定位不工作）" }
+            @{ Pat = 'guide=True';         Msg = "定位到 guide.macroTrust 失败" }
+            # 【这条守的是事件接线本身】。上面几条走的是直接调 OnPaneEvent，
+            # 测的是处理逻辑；wired 只改 ListIndex、不手工调任何东西，
+            # 列表自己变了才说明 clsPaneCtl 的 WithEvents 真的接上了。
+            # 接线断掉的表现是"点了没反应且不报错"，没有这条就抓不到。
+            @{ Pat = 'wired=True';         Msg = "控件事件没接到窗体上（clsPaneCtl 的 WithEvents 包装失效，点了不会有反应）" }
+        )
+        foreach ($c in $checks) {
+            if ($drive -notmatch $c.Pat) { $bad += $c.Msg }
+        }
+        if ($bad.Count -eq 0) {
+            Write-Host "    分组→功能→正文、搜索、体检、条目定位全部有反应" -ForegroundColor Green
+        }
+    }
+
+    # 真的显示一次再关掉：确认 Show 能成功、且不会留下窗体
+    Write-Host "==> 侧边栏显示与关闭" -ForegroundColor Cyan
+    $cycle = $xl.Run("'$OutputName'!Toolbox_HelpPaneShowCycle")
+    if ($cycle -notlike 'OK|*') {
+        $bad += "侧边栏 Show/Unload 失败：$cycle"
+    } elseif ($cycle -notmatch 'visible=True') {
+        $bad += "侧边栏 Show 之后 Visible 不是 True：$cycle"
+    } else {
+        Write-Host "    $cycle" -ForegroundColor Green
+    }
+
+    #-------------------------------------------------------------------------
     # 搜索：用户会怎么描述问题
     #
     # 【搜的是症状，不是功能名】。用户打的是"求和是0"，不是"文本转数值"——

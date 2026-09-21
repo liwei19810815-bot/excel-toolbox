@@ -43,6 +43,9 @@ Public Function ShowPane(Optional ByVal entryId As String = vbNullString) As Str
     On Error GoTo Failed
 
     frmHelpPane.DockRight
+    ' 带了条目就直接定位过去——功能区的「帮助」是总览，
+    ' 而命令执行失败时的「查看帮助」要落到出问题的那一条上。
+    If Len(entryId) > 0 Then frmHelpPane.ShowEntry entryId
     frmHelpPane.Show vbModeless
     Exit Function
 
@@ -676,8 +679,10 @@ Public Function EnvReport() As String
     s = s & "是否设了受信任位置：查不到。" & vbCrLf
     s = s & "  读注册表要用的 WScript.Shell 会被企业安全策略静默拦截，" & vbCrLf
     s = s & "  本工具箱因此不依赖它，这里也不假装检测。" & vbCrLf
-    s = s & "  【按症状判断】每次打开 Excel 都弹宏安全警告，就说明没设受信任位置，" & vbCrLf
-    s = s & "  处理办法见左侧「每次打开都弹安全警告」。" & vbCrLf
+    s = s & "  【按症状判断】每次打开 Excel 都弹宏安全警告，" & vbCrLf
+    s = s & "  【可能】是没设受信任位置——但也可能是宏设置本身、文件带着网络" & vbCrLf
+    s = s & "  来源标记、或者组策略统一管控。要确认还得去信任中心看一眼。" & vbCrLf
+    s = s & "  这几种情况的处理办法见左侧「使用前必读」那一组。" & vbCrLf
 
     s = s & vbCrLf & String$(28, "-") & vbCrLf
     s = s & "以上只是检查，工具箱不会替你修改任何安全设置。" & vbCrLf

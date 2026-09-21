@@ -140,6 +140,69 @@ Failed:
     Toolbox_HelpPaneSmoke = "ERR|" & Err.Number & "|" & Err.Description
 End Function
 
+'------------------------------------------------------------------------------
+' 把侧边栏的【整条交互链】跑一遍：点分组、点功能、搜索、体检、定位条目。
+'
+' 【"控件建得出来"证明不了"点下去有反应"】。运行时控件的事件接不到
+' 窗体代码模块上，必须靠 clsPaneCtl 用 WithEvents 包一层——这层要是被
+' 改坏了，窗体照样弹出来、控件照样在，就是点谁都没反应，而且不报错。
+' 所以这里直接驱动事件入口，断言每一步真的产生了结果。
+'------------------------------------------------------------------------------
+Public Function Toolbox_HelpPaneDrive() As String
+    On Error GoTo Failed
+
+    Dim f As frmHelpPane
+    Set f = New frmHelpPane
+
+    Dim r As String
+    r = f.PaneSelfTest()
+
+    Unload f
+    Set f = Nothing
+
+    Toolbox_HelpPaneDrive = r
+    Exit Function
+
+Failed:
+    Toolbox_HelpPaneDrive = "ERR|" & Err.Number & "|" & Err.Description
+End Function
+
+'------------------------------------------------------------------------------
+' 真的 Show 一次再 Unload，确认能显示、能关干净。
+'
+' 【只有这条会真的弹窗体】，所以它必须自己把窗体关掉。
+' vbModeless 不阻塞，不会把测试吊住；但如果哪天被改成 vbModal，
+' 无头运行下就是永久挂起——那种情况超时即失败，也算被这条守住了。
+'------------------------------------------------------------------------------
+Public Function Toolbox_HelpPaneShowCycle() As String
+    On Error GoTo Failed
+
+    Dim f As frmHelpPane
+    Set f = New frmHelpPane
+
+    f.DockRight
+    f.Show vbModeless
+
+    Dim shown As Boolean
+    shown = f.Visible
+
+    Dim w As Single, l As Single
+    w = f.Width
+    l = f.Left
+
+    Unload f
+    Set f = Nothing
+
+    Toolbox_HelpPaneShowCycle = "OK|visible=" & CStr(shown) & _
+                                "|width=" & CStr(CLng(w)) & "|left=" & CStr(CLng(l))
+    Exit Function
+
+Failed:
+    On Error Resume Next
+    Unload f
+    Toolbox_HelpPaneShowCycle = "ERR|" & Err.Number & "|" & Err.Description
+End Function
+
 ' 「我要做什么」搜索的【只解析不执行】版本，返回命中的 actionId（换行分隔）。
 ' 测试用它断言匹配逻辑，不会真的动用户数据。
 Public Function Toolbox_ResolveHelp(ByVal query As String) As String

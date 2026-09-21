@@ -271,6 +271,118 @@ End Sub
 '==============================================================================
 ' 小工具
 '==============================================================================
+'==============================================================================
+' 定位到某个条目（功能区「帮助」带 actionId 进来、报错框里的"查看帮助"都走这儿）
+'==============================================================================
+Public Sub ShowEntry(ByVal entryId As String)
+    On Error Resume Next
+
+    Dim gid As String
+    If LCase$(Left$(entryId, 6)) = "guide." Then
+        gid = "guide"
+    Else
+        gid = modHelp.GroupOfAction(entryId)
+    End If
+
+    If Len(gid) = 0 Then Exit Sub
+    SelectGroupById gid
+    SelectItemById entryId
+
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+Private Sub SelectGroupById(ByVal gid As String)
+    Dim i As Long
+    For i = LBound(mGroups) To UBound(mGroups)
+        If PartBeforeBar(CStr(mGroups(i))) = gid Then
+            mLstGroups.ListIndex = i
+            ' 【显式调用 LoadItems】：不能指望"设了 ListIndex 就会触发 Click"，
+            ' 那取决于控件实现，靠它等于把正确性寄托在一个没写进文档的行为上。
+            LoadItems gid
+            Exit Sub
+        End If
+    Next i
+End Sub
+
+Private Sub SelectItemById(ByVal entryId As String)
+    If IsEmpty(mItems) Then Exit Sub
+
+    Dim i As Long
+    For i = LBound(mItems) To UBound(mItems)
+        If PartBeforeBar(CStr(mItems(i))) = entryId Then
+            mLstItems.ListIndex = i
+            ShowText modHelp.RenderEntry(entryId)
+            Exit Sub
+        End If
+    Next i
+End Sub
+
+'------------------------------------------------------------------------------
+' 把整条交互链跑一遍，返回一行可断言的结果。
+'
+' 【为什么需要它】：只证明"控件建得出来"是不够的——真正会坏的是
+' 事件接线（运行时控件的事件接不到窗体代码模块上，漏了 clsPaneCtl
+' 那一层的表现是"点了没反应"，而且不报错）。
+' 这里直接走 OnPaneEvent，把点分组、点功能、搜索、体检、定位全跑一遍。
+'------------------------------------------------------------------------------
+Public Function PaneSelfTest() As String
+    On Error GoTo Failed
+
+    Dim r As String
+
+    ' 1) 点分组 -> 功能列表要被填上
+    mLstGroups.ListIndex = 0
+    OnPaneEvent "groups"
+    r = "groups=" & mLstGroups.ListCount & "|items=" & mLstItems.ListCount
+
+    ' 2) 点功能 -> 正文要出来
+    If mLstItems.ListCount > 0 Then
+        mLstItems.ListIndex = 0
+        OnPaneEvent "items"
+    End If
+    r = r & "|bodyLen=" & Len(mTxtBody.Text)
+
+    ' 3) 搜索 -> 按症状能找到，且【不执行任何命令】
+    mTxtSearch.Text = "求和是0"
+    OnPaneEvent "search"
+    r = r & "|search=" & CStr(InStr(mTxtBody.Text, "文本转数值") > 0)
+
+    ' 4) 体检
+    OnPaneEvent "env"
+    r = r & "|env=" & CStr(InStr(mTxtBody.Text, "环境检查结果") > 0)
+
+    ' 5) 定位到指定条目（跨分组）
+    ShowEntry "misc.parseId"
+    r = r & "|entry=" & CStr(InStr(mTxtBody.Text, "身份证") > 0)
+
+    ' 6) 定位到使用配置条目
+    ShowEntry "guide.macroTrust"
+    r = r & "|guide=" & CStr(InStr(mTxtBody.Text, "宏被禁用") > 0)
+
+    ' 7) 【事件接线探针】
+    ' 上面几步都是直接调 OnPaneEvent，测的是处理逻辑，
+    ' 并【没有】测 clsPaneCtl 那层 WithEvents 到底接上没有。
+    ' 这里只改 ListIndex、不手工调任何东西，看功能列表会不会自己变：
+    ' 变了说明 Click 事件真的传到了窗体，没变就是接线断了
+    ' （那正是"点了没反应且不报错"的故障形态）。
+    mLstGroups.ListIndex = 0
+    mLstItems.Clear
+    mLstGroups.ListIndex = 2
+    r = r & "|wired=" & CStr(mLstItems.ListCount > 0)
+
+    PaneSelfTest = "OK|" & r
+    Exit Function
+
+Failed:
+    PaneSelfTest = "ERR|" & Err.Number & "|" & Err.Description
+End Function
+
+Private Sub UserForm_Terminate()
+    ' 事件包装对象的引用显式放掉，别指望回收时机
+    Set mCtls = Nothing
+End Sub
+
 Private Sub ShowText(ByVal s As String)
     On Error Resume Next
     mTxtBody.Text = s
