@@ -140,6 +140,7 @@ function ConvertFrom-HelpMarkdown {
             $cur = [pscustomobject]@{
                 Id        = $Matches[1]
                 Keywords  = ""
+                Title     = ""
                 Body      = ""
                 BodyLines = @()
             }
@@ -149,6 +150,11 @@ function ConvertFrom-HelpMarkdown {
 
         if ($line -match '^关键词[:：]\s*(.+)$') {
             $cur.Keywords = $Matches[1].Trim()
+            continue
+        }
+        # 只有 guide.* 会写这一行；命令条目的标题来自注册表
+        if ($line -match '^标题[:：]\s*(.+)$') {
+            $cur.Title = $Matches[1].Trim()
             continue
         }
         $cur.BodyLines += $line
@@ -229,6 +235,43 @@ try {
         Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
 
+    #-------------------------------------------------------------------------
+    # 用户窗体：新建空窗体 + 注入代码，【仓库里不放 .frm/.frx】
+    #
+    # .frm 必须配一个同名 .frx 二进制资源，控件布局就存在那个二进制里——
+    # git 看不出任何差别，评审也无从审起，和本仓库"源码必须可 diff"冲突。
+    # 所以这里建一个空窗体，把 src\ui\*.vba 的代码注进去，
+    # 控件全部由那段代码在运行时 Controls.Add 生成。
+    #
+    # 走的是和 ThisWorkbook 文档模块同一条路子（CodeModule 注入），不是 Import。
+    #-------------------------------------------------------------------------
+    $uiDir = Join-Path $RepoRoot "src\ui"
+    if (Test-Path $uiDir) {
+        $forms = @(Get-ChildItem -Path $uiDir -Filter *.vba | Sort-Object Name)
+        if ($forms.Count -gt 0) {
+            Write-Step "注入用户窗体"
+            foreach ($f in $forms) {
+                $formName = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
+
+                $comp = $wb.VBProject.VBComponents.Add(3)     # vbext_ct_MSForm
+                $comp.Name = $formName
+                if ([int]$comp.Type -ne 3) {
+                    throw "$formName 建出来的组件类型是 $($comp.Type)，预期 3（用户窗体）。"
+                }
+
+                # 走 COM 传字符串（BSTR/UTF-16），没有编码问题，但换行仍需 CRLF
+                $code = [System.IO.File]::ReadAllText($f.FullName, (New-Object System.Text.UTF8Encoding($false)))
+                $code = ($code -replace "`r`n", "`n") -replace "`n", "`r`n"
+
+                $cm = $comp.CodeModule
+                if ($cm.CountOfLines -gt 0) { $cm.DeleteLines(1, $cm.CountOfLines) }
+                $cm.AddFromString($code)
+
+                Write-Ok "src\ui\$($f.Name)"
+            }
+        }
+    }
+
     # 文档模块不能 Import，只能往 CodeModule 里塞源码
     $docModule = Join-Path $CodeDir "Core\ThisWorkbook.doccls"
     if (Test-Path $docModule) {
@@ -263,12 +306,16 @@ try {
         $sh.Cells(1, 1).Value2 = "actionId"
         $sh.Cells(1, 2).Value2 = "keywords"
         $sh.Cells(1, 3).Value2 = "body"
+        # 第 4 列只有 guide.* 用得上：命令条目的标题实时取自命令注册表，
+        # 存两份必然漂移；而 guide.* 不是命令，没有注册项，标题只能写在这儿。
+        $sh.Cells(1, 4).Value2 = "title"
 
         $r = 2
         foreach ($e in $entries) {
             $sh.Cells($r, 1).Value2 = $e.Id
             $sh.Cells($r, 2).Value2 = $e.Keywords
             $sh.Cells($r, 3).Value2 = $e.Body
+            $sh.Cells($r, 4).Value2 = $e.Title
             $r++
         }
         # xlSheetVeryHidden = 2：用户从右键菜单取消隐藏也看不到它，

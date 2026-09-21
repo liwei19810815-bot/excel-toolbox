@@ -27,6 +27,30 @@ Private Const HELP_SHEET As String = "_Help"
 '------------------------------------------------------------------------------
 ' 打开帮助总览。功能区「帮助」按钮调用。
 '------------------------------------------------------------------------------
+'------------------------------------------------------------------------------
+' 打开右侧帮助侧边栏。功能区「帮助」按钮走这里。
+'
+' 【它不是 Office 原生的任务窗格】：真正的任务窗格只有 COM 加载项能创建，
+' 纯 VBA 的 .xlam 拿不到那个接口。这里是一个贴在右缘的无模式窗体，
+' 能常驻、能边看边操作，但不会把表格区域挤窄。
+'
+' 完整 HTML 那条路保留着（侧边栏底部有入口），要打印或全文检索时更合适。
+'------------------------------------------------------------------------------
+Public Function ShowPane(Optional ByVal entryId As String = vbNullString) As String
+    ' 静默模式（回归测试）里绝不能弹窗体：它会一直等在那儿，把测试挂死
+    If modAction.IsSilent() Then Exit Function
+
+    On Error GoTo Failed
+
+    frmHelpPane.DockRight
+    frmHelpPane.Show vbModeless
+    Exit Function
+
+Failed:
+    ' 侧边栏开不出来时退回浏览器版本，至少让用户看得到帮助
+    ShowPane = ShowAll()
+End Function
+
 Public Function ShowAll() As String
     Dim path As String
     path = BuildHtml(vbNullString)
@@ -428,3 +452,265 @@ Private Sub OpenInBrowser(ByVal path As String)
     Err.Clear
     On Error GoTo 0
 End Sub
+
+'==============================================================================
+' 侧边栏用的目录与正文组装
+'
+' 【逻辑全部放在这里，窗体只负责显示】。窗体在无头测试里跑不起来，
+' 把组装逻辑写进窗体事件 = 又多一块没有任何测试覆盖的代码，
+' 而这正是本项目一直在防的东西。下面每个函数都能被无头通路直接断言。
+'==============================================================================
+
+'------------------------------------------------------------------------------
+' 分组清单，返回 "groupId|分组标题" 每行一条。
+'
+' 【使用配置排在最前】：用户装完打不开、宏被禁用的时候，
+' 他要找的不是"文本处理"，是"为什么这玩意儿没反应"。
+'------------------------------------------------------------------------------
+Public Function CatalogGroups() As String
+    Dim s As String
+    s = "guide|使用前必读（Excel 配置）"
+    s = s & vbLf & "core|撤销与关于"
+    s = s & vbLf & "text|M1 文本处理"
+    s = s & vbLf & "data|M2 数据处理"
+    s = s & vbLf & "sheet|M3 工作表管理"
+    s = s & vbLf & "merge|M4 多文件合并"
+    s = s & vbLf & "file|M5 文件批处理"
+    s = s & vbLf & "formula|M6 公式与引用"
+    s = s & vbLf & "audit|M7 数据体检"
+    s = s & vbLf & "viz|M8 数据可视化"
+    s = s & vbLf & "misc|M9 辅助增强"
+    CatalogGroups = s
+End Function
+
+'------------------------------------------------------------------------------
+' 某一组下的条目，返回 "id|显示名" 每行一条。
+'
+' guide 组来自帮助表（它们不是命令，没有注册项）；
+' 其余各组来自命令注册表，显示名实时取自注册表——
+' 和功能区标签同源，不会漂移。
+'------------------------------------------------------------------------------
+Public Function CatalogItems(ByVal groupId As String) As String
+    If LCase$(groupId) = "guide" Then
+        CatalogItems = GuideItems()
+        Exit Function
+    End If
+
+    Dim ids As Variant, i As Long, s As String, oneId As String
+    ids = Split(modAction.AllActionIds(), vbLf)
+    For i = LBound(ids) To UBound(ids)
+        oneId = Trim$(CStr(ids(i)))
+        If Len(oneId) > 0 Then
+            If GroupOf(oneId) = LCase$(groupId) Then
+                If Len(s) > 0 Then s = s & vbLf
+                s = s & oneId & "|" & modAction.ActionLabel(oneId)
+            End If
+        End If
+    Next i
+    CatalogItems = s
+End Function
+
+'------------------------------------------------------------------------------
+' actionId -> 分组。
+'
+' 【cells.* 归到 M1】：拆分合并单元格、合并相同项在功能清单里就列在
+' M1 文本处理下。跟着功能清单走，别让帮助目录和文档各说一套。
+'------------------------------------------------------------------------------
+Private Function GroupOf(ByVal actionId As String) As String
+    Dim prefix As String
+    Dim dotPos As Long
+
+    dotPos = InStr(actionId, ".")
+    If dotPos <= 1 Then Exit Function
+    prefix = LCase$(Left$(actionId, dotPos - 1))
+
+    If prefix = "cells" Then
+        GroupOf = "text"
+    Else
+        GroupOf = prefix
+    End If
+End Function
+
+' 给测试用：断言没有命令落在目录之外
+Public Function GroupOfAction(ByVal actionId As String) As String
+    GroupOfAction = GroupOf(actionId)
+End Function
+
+'------------------------------------------------------------------------------
+' guide.* 条目：id 与标题都来自帮助表（标题在第 4 列）。
+'------------------------------------------------------------------------------
+Private Function GuideItems() As String
+    On Error Resume Next
+    Dim sh As Object
+    Set sh = HelpSheet()
+    If sh Is Nothing Then Exit Function
+
+    Dim r As Long, lastRow As Long, s As String
+    Dim oneId As String, title As String
+
+    lastRow = sh.Cells(sh.Rows.Count, 1).End(-4162).Row
+    For r = 2 To lastRow
+        oneId = CStr(sh.Cells(r, 1).Value2)
+        If LCase$(Left$(oneId, 6)) = "guide." Then
+            title = CStr(sh.Cells(r, 4).Value2)
+            If Len(title) = 0 Then title = oneId
+            If Len(s) > 0 Then s = s & vbLf
+            s = s & oneId & "|" & title
+        End If
+    Next r
+
+    Err.Clear
+    On Error GoTo 0
+    GuideItems = s
+End Function
+
+' 帮助表第 4 列（只有 guide.* 用得上）
+Private Function TitleOf(ByVal entryId As String) As String
+    On Error Resume Next
+    Dim sh As Object
+    Set sh = HelpSheet()
+    If sh Is Nothing Then Exit Function
+
+    Dim r As Long, lastRow As Long
+    lastRow = sh.Cells(sh.Rows.Count, 1).End(-4162).Row
+    For r = 2 To lastRow
+        If StrComp(CStr(sh.Cells(r, 1).Value2), entryId, vbTextCompare) = 0 Then
+            TitleOf = CStr(sh.Cells(r, 4).Value2)
+            Exit Function
+        End If
+    Next r
+
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+'------------------------------------------------------------------------------
+' 侧边栏正文（纯文本，不是 HTML）。
+'
+' 命令条目的标题与可撤销性【实时取自注册表】，不从 help.md 读——
+' 两边各写一份必然漂移，而帮助没人天天看，漂移了几个月都不会有人发现。
+'------------------------------------------------------------------------------
+Public Function RenderEntry(ByVal entryId As String) As String
+    Dim body As String
+    Dim head As String
+
+    body = BodyOf(entryId)
+
+    If LCase$(Left$(entryId, 6)) = "guide." Then
+        head = TitleOf(entryId)
+        If Len(head) = 0 Then head = entryId
+    Else
+        Dim d As clsActionDef
+        Set d = modAction.GetAction(entryId)
+        If d Is Nothing Then
+            RenderEntry = "没有找到这个条目：" & entryId
+            Exit Function
+        End If
+        head = d.Label
+        If d.Undoable Then
+            head = head & "　【可撤销】"
+        Else
+            head = head & "　【不可撤销】"
+        End If
+    End If
+
+    If Len(body) = 0 Then
+        RenderEntry = head & vbCrLf & String$(28, "-") & vbCrLf & _
+                      "（这一条还没有帮助正文）"
+        Exit Function
+    End If
+
+    RenderEntry = head & vbCrLf & String$(28, "-") & vbCrLf & vbCrLf & _
+                  StripMarkdown(body)
+End Function
+
+'------------------------------------------------------------------------------
+' help.md 是给 HTML 用的，带 ### 和 **。侧边栏是纯文本控件，
+' 直接把这些标记显示出来很难看，这里做一次轻量清洗。
+'
+' 【不做完整 Markdown 渲染】：TextBox 显示不了富文本，做了也没用。
+'------------------------------------------------------------------------------
+Private Function StripMarkdown(ByVal src As String) As String
+    Dim lines As Variant, i As Long, s As String, ln As String
+
+    lines = Split(Replace(src, vbCrLf, vbLf), vbLf)
+    For i = LBound(lines) To UBound(lines)
+        ln = CStr(lines(i))
+        If Left$(ln, 4) = "### " Then
+            ln = "【" & Trim$(Mid$(ln, 5)) & "】"
+        End If
+        ln = Replace(ln, "**", "")
+        If Len(s) > 0 Then s = s & vbCrLf
+        s = s & ln
+    Next i
+
+    StripMarkdown = s
+End Function
+
+'==============================================================================
+' 环境体检
+'
+' 【只报告，绝不代改】。信任中心、受信任位置属于【安全设置】，
+' 插件替用户改等于替他降低防护等级——哪怕他点了同意也不该由插件来做。
+' 这里只把能观察到的事实摆出来，怎么改由用户按指引自己操作。
+'==============================================================================
+Public Function EnvReport() As String
+    Dim s As String
+
+    s = "环境检查结果" & vbCrLf & String$(28, "=") & vbCrLf & vbCrLf
+
+    s = s & "工具箱版本：" & modApp.APP_VERSION & vbCrLf
+    s = s & "宿主程序　：" & SafeHostName() & vbCrLf
+    s = s & "版本 / 位数：" & SafeHostVersion() & " / " & modApp.HostBitness() & vbCrLf
+    s = s & "已注册命令：" & modAction.ActionCount() & " 个" & vbCrLf
+    s = s & "功能区加载：" & IIf(modRibbon.IsRibbonLoaded(), "正常", "【未加载】") & vbCrLf
+
+    ' 宏能不能用不需要去读注册表——你能看到这份报告本身就是证据
+    s = s & "宏的状态　：已启用（否则这份报告根本出不来）" & vbCrLf
+
+    ' "改了数不更新"的高频元凶，而用户几乎不会想到是这里
+    s = s & "重算模式　：" & CalcModeText() & vbCrLf
+
+    s = s & vbCrLf & String$(28, "-") & vbCrLf
+    s = s & "【无法自动检测的项】" & vbCrLf
+    s = s & "是否设了受信任位置：查不到。" & vbCrLf
+    s = s & "  读注册表要用的 WScript.Shell 会被企业安全策略静默拦截，" & vbCrLf
+    s = s & "  本工具箱因此不依赖它，这里也不假装检测。" & vbCrLf
+    s = s & "  【按症状判断】每次打开 Excel 都弹宏安全警告，就说明没设受信任位置，" & vbCrLf
+    s = s & "  处理办法见左侧「每次打开都弹安全警告」。" & vbCrLf
+
+    s = s & vbCrLf & String$(28, "-") & vbCrLf
+    s = s & "以上只是检查，工具箱不会替你修改任何安全设置。" & vbCrLf
+    s = s & "需要改信任中心的，请按左侧「使用前必读」里的指引自己操作。"
+
+    EnvReport = s
+End Function
+
+Private Function SafeHostName() As String
+    On Error Resume Next
+    SafeHostName = Application.Name
+    If Len(SafeHostName) = 0 Then SafeHostName = "(取不到)"
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+Private Function SafeHostVersion() As String
+    On Error Resume Next
+    SafeHostVersion = Application.Version
+    If Len(SafeHostVersion) = 0 Then SafeHostVersion = "(取不到)"
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+Private Function CalcModeText() As String
+    On Error Resume Next
+    Select Case Application.Calculation
+        Case -4105: CalcModeText = "自动（正常）"
+        Case -4135: CalcModeText = "【手动】——公式不会自动重算，这是「改了数不更新」的常见原因"
+        Case 2:     CalcModeText = "除模拟运算表外自动"
+        Case Else:  CalcModeText = "未知"
+    End Select
+    If Len(CalcModeText) = 0 Then CalcModeText = "(取不到)"
+    Err.Clear
+    On Error GoTo 0
+End Function

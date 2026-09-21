@@ -81,6 +81,65 @@ Public Function Toolbox_HasHelp(ByVal actionId As String) As Boolean
     Toolbox_HasHelp = modHelp.HasEntry(actionId)
 End Function
 
+'------------------------------------------------------------------------------
+' 帮助侧边栏的数据入口。
+'
+' 【窗体本身在无头测试里跑不起来】，所以内容组装全放在 modHelp，
+' 这里把它们暴露出来让测试直接断言。窗体只是这些函数的一个显示外壳——
+' 换句话说，侧边栏里显示的每一段文字都是被测过的。
+'------------------------------------------------------------------------------
+Public Function Toolbox_HelpGroups() As String
+    Toolbox_HelpGroups = modHelp.CatalogGroups()
+End Function
+
+Public Function Toolbox_HelpItems(ByVal groupId As String) As String
+    Toolbox_HelpItems = modHelp.CatalogItems(groupId)
+End Function
+
+Public Function Toolbox_HelpRender(ByVal entryId As String) As String
+    Toolbox_HelpRender = modHelp.RenderEntry(entryId)
+End Function
+
+Public Function Toolbox_HelpGroupOf(ByVal actionId As String) As String
+    Toolbox_HelpGroupOf = modHelp.GroupOfAction(actionId)
+End Function
+
+Public Function Toolbox_EnvReport() As String
+    Toolbox_EnvReport = modHelp.EnvReport()
+End Function
+
+'------------------------------------------------------------------------------
+' 帮助侧边栏的冒烟测试：能不能建出来、控件在不在、能不能卸掉。
+'
+' 【只实例化，绝不 Show】。无头运行时弹一个无模式窗体出来，
+' 轻则留一个谁也看不见的窗口，重则把测试吊住——这正是本项目
+' 反复踩过的"看不见的模态框"那一类问题。
+'
+' 窗体里的内容逻辑已经在 modHelp 那一层被断言过了，这里只需要确认
+' "控件真的建起来了"——Controls.Add 失败是静默的，表现为侧边栏一片空白。
+'------------------------------------------------------------------------------
+Public Function Toolbox_HelpPaneSmoke() As String
+    On Error GoTo Failed
+
+    Dim f As frmHelpPane
+    Set f = New frmHelpPane          ' 触发 Initialize -> BuildUi
+
+    Dim n As Long
+    n = f.Controls.Count
+
+    Dim hasBody As Boolean
+    hasBody = (Len(f.Controls("txtBody").Text) > 0)
+
+    Unload f
+    Set f = Nothing
+
+    Toolbox_HelpPaneSmoke = "OK|controls=" & n & "|body=" & CStr(hasBody)
+    Exit Function
+
+Failed:
+    Toolbox_HelpPaneSmoke = "ERR|" & Err.Number & "|" & Err.Description
+End Function
+
 ' 「我要做什么」搜索的【只解析不执行】版本，返回命中的 actionId（换行分隔）。
 ' 测试用它断言匹配逻辑，不会真的动用户数据。
 Public Function Toolbox_ResolveHelp(ByVal query As String) As String

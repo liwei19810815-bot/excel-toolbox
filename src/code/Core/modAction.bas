@@ -588,7 +588,7 @@ Private Function Dispatch(ByVal actionId As String) As String
         Case "core.resetEnv":  modPerf.FastModeReset
         Case "core.selfTest":  Dispatch = modApp.AboutText() & vbCrLf & vbCrLf & "加载宏工作正常。"
         Case "core.about":     Dispatch = modApp.AboutText()
-        Case "core.help":      Dispatch = modHelp.ShowAll()
+        Case "core.help":      Dispatch = modHelp.ShowPane()
 
         ' --- M1 文本与单元格 ---
         Case "text.cleanSpaces":      Dispatch = modText.CleanSpaces(Selection)

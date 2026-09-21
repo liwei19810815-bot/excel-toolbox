@@ -56,10 +56,16 @@ $regIds = @(
     ForEach-Object { $_.Matches[0].Groups[1].Value }
 )
 
-Write-Host "    注册命令 $($regIds.Count) 个，帮助条目 $($helpIds.Count) 条" -ForegroundColor DarkGray
+# guide.* 是【使用配置条目】，不是命令：它们讲的是信任宏、受信任位置、
+# 解除文件锁定这类 Excel 自身的设置，没有也不该有对应的 actionId。
+# 拿它们去和注册表比对会全部被判成孤儿，所以这里分开处理。
+$guideIds  = @($helpIds | Where-Object { $_ -like 'guide.*' })
+$cmdHelpIds = @($helpIds | Where-Object { $_ -notlike 'guide.*' })
 
-$missing = @($regIds | Where-Object { $helpIds -notcontains $_ })
-$orphan  = @($helpIds | Where-Object { $regIds -notcontains $_ })
+Write-Host "    注册命令 $($regIds.Count) 个，命令帮助 $($cmdHelpIds.Count) 条，使用配置 $($guideIds.Count) 条" -ForegroundColor DarkGray
+
+$missing = @($regIds | Where-Object { $cmdHelpIds -notcontains $_ })
+$orphan  = @($cmdHelpIds | Where-Object { $regIds -notcontains $_ })
 $dupe    = @($helpIds | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
 
 # 注册表里重复注册同一个 actionId 也要抓：后注册的会静默覆盖先注册的，
@@ -72,12 +78,39 @@ foreach ($o in $orphan)  { $errors += "帮助条目对应的命令已不存在�
 foreach ($d in $dupe)    { $errors += "帮助条目重复：$d" }
 foreach ($d in $regDupe) { $errors += "命令重复注册：$d（后一条会静默覆盖前一条）" }
 
+# 【每条命令都必须有示例】。"什么时候用/怎么用"是抽象描述，
+# 业务人员看完照样不知道点下去会发生什么。示例写"处理前 → 处理后"，
+# 是这次帮助改版的核心要求，漏写不会有任何其它征兆。
+$helpText = Get-Content -LiteralPath $HelpMd -Raw -Encoding UTF8
+$sections = [regex]::Split($helpText, '(?m)^##\s+') | Select-Object -Skip 1
+foreach ($sec in $sections) {
+    $id = ($sec -split '\r?\n', 2)[0].Trim()
+    if ($id -like 'guide.*') {
+        # 使用配置条目不要求示例，但必须有标题——侧边栏目录靠它显示
+        if ($sec -notmatch '(?m)^标题[:：]\s*\S') {
+            $errors += "使用配置条目缺少「标题:」一行：$id（侧边栏目录会显示成 id）"
+        }
+    }
+    elseif ($sec -notmatch '(?m)^###\s+示例\s*$') {
+        $errors += "缺少示例：$id（在 help.md 的该节里加一段 ### 示例，写处理前→处理后）"
+    }
+}
+
+# 使用配置条目一条都不能少：它们是用户装完打不开时唯一的自助入口
+$requiredGuides = @(
+    'guide.macroTrust', 'guide.trustedLocation', 'guide.unblockFile',
+    'guide.addinMissing', 'guide.multiOffice', 'guide.undoLimits', 'guide.telemetry'
+)
+foreach ($g in $requiredGuides) {
+    if ($guideIds -notcontains $g) { $errors += "缺少使用配置条目：$g" }
+}
+
 if ($errors.Count -gt 0) {
     Write-Host "静态检查未通过：" -ForegroundColor Red
     $errors | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
     exit 1
 }
-Write-Host "    一一对应，无缺失、无孤儿、无重复" -ForegroundColor Green
+Write-Host "    一一对应，无缺失、无孤儿、无重复；$($cmdHelpIds.Count) 条命令都有示例" -ForegroundColor Green
 
 #-----------------------------------------------------------------------------
 # 再做运行时检查：帮助内容真的进了 .xlam
@@ -105,6 +138,108 @@ try {
 
     if ($bad.Count -eq 0) {
         Write-Host "    全部 $($ids.Count) 个命令都能取到帮助正文" -ForegroundColor Green
+    }
+
+    #-------------------------------------------------------------------------
+    # 侧边栏目录
+    #
+    # 【每个命令都必须落在某个分组里】。分组是按 actionId 前缀派生的，
+    # 将来加一个新前缀（比如 chart.*）而忘了在 CatalogGroups 里加一行，
+    # 那些命令就会从目录里【静默消失】——功能还在、按钮还在，
+    # 只是用户在帮助里永远找不到它们，没有任何测试会因此变红。
+    #-------------------------------------------------------------------------
+    Write-Host "==> 侧边栏目录：分组覆盖与内容" -ForegroundColor Cyan
+
+    $groupIds = @(($xl.Run("'$OutputName'!Toolbox_HelpGroups") -split "`n") |
+                  Where-Object { $_ } | ForEach-Object { ($_ -split '\|')[0] })
+    Write-Host "    分组 $($groupIds.Count) 个" -ForegroundColor DarkGray
+
+    $ungrouped = @()
+    foreach ($id in $ids) {
+        $g = $xl.Run("'$OutputName'!Toolbox_HelpGroupOf", $id)
+        if (-not $g -or $groupIds -notcontains $g) { $ungrouped += "$id -> '$g'" }
+    }
+    if ($ungrouped.Count -gt 0) {
+        $bad += "以下命令不属于任何目录分组：" + ($ungrouped -join '; ')
+    } else {
+        Write-Host "    $($ids.Count) 个命令全部归入分组，无遗漏" -ForegroundColor Green
+    }
+
+    # 目录里各组条目加起来要等于命令总数（既不重复也不漏）
+    $catalogCount = 0
+    foreach ($g in $groupIds) {
+        if ($g -eq 'guide') { continue }
+        $items = @(($xl.Run("'$OutputName'!Toolbox_HelpItems", $g) -split "`n") | Where-Object { $_ })
+        $catalogCount += $items.Count
+    }
+    if ($catalogCount -ne $ids.Count) {
+        $bad += "目录条目数 $catalogCount 与命令数 $($ids.Count) 对不上"
+    } else {
+        Write-Host "    目录条目数与命令数一致（$catalogCount）" -ForegroundColor Green
+    }
+
+    # 使用配置条目必须真的进了加载宏，并且目录里显示的是标题而不是 id
+    $guideItems = @(($xl.Run("'$OutputName'!Toolbox_HelpItems", "guide") -split "`n") | Where-Object { $_ })
+    if ($guideItems.Count -lt 7) {
+        $bad += "使用配置条目只取到 $($guideItems.Count) 条，应有 7 条（构建可能没注入 title 列）"
+    } else {
+        $noTitle = @($guideItems | Where-Object { ($_ -split '\|')[1] -match '^guide\.' })
+        if ($noTitle.Count -gt 0) {
+            $bad += "使用配置条目在目录里显示成了 id 而不是标题：" + ($noTitle -join '; ')
+        } else {
+            Write-Host "    使用配置 $($guideItems.Count) 条，目录显示标题正常" -ForegroundColor Green
+        }
+    }
+
+    # 正文渲染：命令条目要带可撤销标注，使用配置条目要带标题
+    $render = $xl.Run("'$OutputName'!Toolbox_HelpRender", "text.cleanSpaces")
+    if ($render -notmatch '可撤销') { $bad += "命令正文缺少可撤销标注：text.cleanSpaces" }
+    if ($render -notmatch '示例')   { $bad += "命令正文里没有示例：text.cleanSpaces" }
+    if ($render -match '###')       { $bad += "命令正文没清掉 Markdown 标记（侧边栏是纯文本控件）" }
+
+    $renderGuide = $xl.Run("'$OutputName'!Toolbox_HelpRender", "guide.macroTrust")
+    if ($renderGuide -notmatch '宏被禁用') { $bad += "使用配置正文渲染不出标题：guide.macroTrust" }
+
+    #-------------------------------------------------------------------------
+    # 环境体检：【只报告，不代改】
+    #
+    # 这条断言守的是一个承诺而不是一个功能：工具箱不替用户改安全设置。
+    # 将来有人"顺手"加上自动修改注册表的代码，这里会红。
+    #-------------------------------------------------------------------------
+    Write-Host "==> 环境体检" -ForegroundColor Cyan
+    $env = $xl.Run("'$OutputName'!Toolbox_EnvReport")
+    foreach ($must in @('工具箱版本', '宿主程序', '功能区加载', '重算模式', '不会替你修改')) {
+        if ($env -notmatch $must) { $bad += "环境体检报告缺少「$must」" }
+    }
+    # 查不到的事情要如实说查不到，不能假装检测
+    if ($env -notmatch '无法自动检测') {
+        $bad += "环境体检没有如实标注「受信任位置无法自动检测」"
+    }
+    if ($bad.Count -eq 0) { Write-Host "    报告内容完整，且明确声明不代改设置" -ForegroundColor Green }
+
+    #-------------------------------------------------------------------------
+    # 侧边栏窗体冒烟
+    #
+    # 【Controls.Add 失败是静默的】：窗体照样弹出来，只是一片空白。
+    # 没有这条断言的话，运行时控件那套写法一旦被改坏，
+    # 所有功能测试依然全绿，只有用户会看到一个空窗口。
+    #-------------------------------------------------------------------------
+    Write-Host "==> 帮助侧边栏（只实例化，不显示）" -ForegroundColor Cyan
+    $smoke = $xl.Run("'$OutputName'!Toolbox_HelpPaneSmoke")
+    if ($smoke -notlike 'OK|*') {
+        $bad += "侧边栏窗体建不出来：$smoke"
+    } else {
+        $ctlCount = 0
+        if ($smoke -match 'controls=(\d+)') { $ctlCount = [int]$Matches[1] }
+        if ($ctlCount -lt 7) {
+            $bad += "侧边栏控件只建出 $ctlCount 个，预期至少 7 个（搜索框/搜索钮/两个列表/正文/两个按钮）"
+        }
+        if ($smoke -notmatch 'body=True') {
+            $bad += "侧边栏正文区是空的（欢迎文案没显示出来）"
+        }
+        if ($bad.Count -eq 0) {
+            Write-Host "    窗体可实例化，控件 $ctlCount 个，正文已填充，可正常卸载" -ForegroundColor Green
+        }
     }
 
     #-------------------------------------------------------------------------
