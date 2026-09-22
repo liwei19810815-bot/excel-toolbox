@@ -165,6 +165,38 @@ function Invoke-Sidecar {
     }
 }
 
+
+#------------------------------------------------------------------------------
+# 裸 socket 发一段原始 HTTP。
+#
+# 【不能用 HttpWebRequest 测这些】：它会自己把头部规范化、自己算
+# Content-Length，畸形请求根本发不出去——那样测的是 .NET 的客户端，
+# 不是我们的服务端。
+#------------------------------------------------------------------------------
+function Invoke-RawHttp([int]$Port, [string]$Raw) {
+    try {
+        $c = New-Object Net.Sockets.TcpClient
+        $c.Connect("127.0.0.1", $Port)
+        $c.ReceiveTimeout = 5000
+        $st = $c.GetStream()
+        $bytes = [Text.Encoding]::ASCII.GetBytes($Raw)
+        $st.Write($bytes, 0, $bytes.Length)
+        $st.Flush()
+
+        $sr = New-Object IO.StreamReader($st)
+        $text = $sr.ReadToEnd()
+        $c.Close()
+        return $text
+    } catch {
+        return "EXCEPTION: $($_.Exception.Message)"
+    }
+}
+
+function Get-StatusCode([string]$rawResponse) {
+    if ($rawResponse -match '^HTTP/1\.1 (\d{3})') { return [int]$Matches[1] }
+    return 0
+}
+
 try {
     #==========================================================================
     Section "源码级约束（这些错编译不会报，跑起来也看不出来）"
@@ -345,6 +377,59 @@ try {
     }
     Assert-True $gone "宿主进程一个都不剩时，sidecar 自己退出"
     Stop-Sidecar $w
+
+    #==========================================================================
+    Section "HTTP 解析的边界（畸形请求不能被放行）"
+    #==========================================================================
+    # 这一节全部用裸 socket，因为要发的正是"正常客户端发不出来"的东西。
+
+    # 【头部名大小写不敏感】。HTTP 规范要求如此。
+    # 真实客户端（fetch / XHR / 代理）完全可能把头名小写化，
+    # 区分大小写的话表现是【带着正确令牌却一直 401】。
+    $raw = Invoke-RawHttp $sc.Port "GET /health HTTP/1.1`r`nHost: 127.0.0.1`r`nx-toolbox-token: $Token`r`nConnection: close`r`n`r`n"
+    Assert-Equal 200 (Get-StatusCode $raw) "头部名小写也认（HTTP 头不区分大小写）"
+
+    $raw = Invoke-RawHttp $sc.Port "GET /health HTTP/1.1`r`nHost: 127.0.0.1`r`nX-TOOLBOX-TOKEN: $Token`r`nConnection: close`r`n`r`n"
+    Assert-Equal 200 (Get-StatusCode $raw) "头部名全大写也认"
+
+    # 【重复令牌头只取第一个】。取最后一个的话，攻击者可以在一个
+    # 合法请求后面追加自己的头来覆盖前面的值。
+    $raw = Invoke-RawHttp $sc.Port "GET /health HTTP/1.1`r`nHost: 127.0.0.1`r`nX-Toolbox-Token: wrong-token-here-000000000000000000`r`nX-Toolbox-Token: $Token`r`nConnection: close`r`n`r`n"
+    Assert-Equal 401 (Get-StatusCode $raw) "重复令牌头：以第一个为准，后面的覆盖不了"
+
+    # 【Content-Length 不是数字时必须拒绝】。当成 0 的话请求体被丢掉，
+    # 但请求仍按"没有正文"继续处理——我们和客户端对同一个请求的理解
+    # 就不一致了，这正是 HTTP 走私类问题的温床。
+    #
+    # 【这几条必须打在 /health 上，不能打在 /refresh-query 上】。
+    # 打在 /refresh-query 上是测不出来的：正文被丢掉之后它会因为
+    # "没给查询名"而回 400，和"正确地拒绝了畸形请求"同样是 400——
+    # 两种原因分不开，断言就会【因为错误的原因变绿】。
+    # /health 本来就不需要正文，所以只有真的拒绝了才会是 400。
+    # （变异测试正是这么发现这条断言不够格的。）
+    $raw = Invoke-RawHttp $sc.Port "GET /health HTTP/1.1`r`nHost: 127.0.0.1`r`nX-Toolbox-Token: $Token`r`nContent-Length: abc`r`nConnection: close`r`n`r`n"
+    Assert-Equal 400 (Get-StatusCode $raw) "Content-Length 非数字：400（不当成 0）"
+
+    $raw = Invoke-RawHttp $sc.Port "GET /health HTTP/1.1`r`nHost: 127.0.0.1`r`nX-Toolbox-Token: $Token`r`nContent-Length: -5`r`nConnection: close`r`n`r`n"
+    Assert-Equal 400 (Get-StatusCode $raw) "Content-Length 为负：400"
+
+    # 声明一个超大正文：必须拒掉，不能真去分配那么多内存
+    $raw = Invoke-RawHttp $sc.Port "GET /health HTTP/1.1`r`nHost: 127.0.0.1`r`nX-Toolbox-Token: $Token`r`nContent-Length: 99999999`r`nConnection: close`r`n`r`n"
+    Assert-Equal 400 (Get-StatusCode $raw) "声明超大正文：400（不分配那么多内存）"
+
+    # 正常的 POST 仍要能走通——上面几条不能把合法请求也拦了
+    $raw = Invoke-RawHttp $sc.Port "POST /refresh-query HTTP/1.1`r`nHost: 127.0.0.1`r`nX-Toolbox-Token: $Token`r`nContent-Length: 12`r`nConnection: close`r`n`r`n{`"name`":`"x`"}"
+    Assert-Equal 200 (Get-StatusCode $raw) "Content-Length 正确的 POST 照常受理"
+
+    # 超长头部不能把服务打挂
+    $huge = "X-Junk: " + ("A" * 20000)
+    $raw = Invoke-RawHttp $sc.Port "GET /health HTTP/1.1`r`nHost: 127.0.0.1`r`n$huge`r`nX-Toolbox-Token: $Token`r`nConnection: close`r`n`r`n"
+    Assert-True ((Get-StatusCode $raw) -ne 200) "超长头部：不放行"
+
+    # 【发完这些畸形请求，服务必须还活着】。
+    # 一个坏请求把整个 sidecar 打挂的话，等于任何网页都能让它拒绝服务。
+    $r = Invoke-Sidecar -Port $sc.Port -Token $Token
+    Assert-Equal 200 $r.Status "一连串畸形请求之后，服务仍然正常"
 
     #==========================================================================
     Section "只绑回环：从本机的非回环地址连不上"

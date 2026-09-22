@@ -164,6 +164,9 @@ namespace ExcelToolbox.Sidecar
         // 【不能是局部变量】——那样会被 GC 回收，互斥体提前释放，单实例就失效了。
         private static Mutex _singleInstanceMutex;
 
+        // 连续查不到宿主状态多少次就认输退出。2 秒一次，30 次 = 1 分钟。
+        private const int MaxProbeFailures = 30;
+
         private static void WatchHost(string processName, int graceSeconds, SidecarServer server)
         {
             var t = new Thread(delegate()
@@ -172,13 +175,33 @@ namespace ExcelToolbox.Sidecar
                 // 所以给一段宽限期，别刚起来就把自己关了。
                 var deadline = DateTime.UtcNow.AddSeconds(graceSeconds);
                 bool everSeen = false;
+                int probeFailures = 0;
 
                 while (true)
                 {
                     Thread.Sleep(2000);
-                    int n = 0;
-                    try { n = Process.GetProcessesByName(processName).Length; }
-                    catch { n = 1; }   // 查不到就当它还在，宁可多活一会儿也别误杀
+                    int n;
+                    try
+                    {
+                        n = Process.GetProcessesByName(processName).Length;
+                        probeFailures = 0;
+                    }
+                    catch
+                    {
+                        // 查不到先当它还在，宁可多活一会儿也别误杀。
+                        // 【但不能永远这么认】：查询要是一直失败（权限、系统异常），
+                        // 把它恒定解释成"宿主还在"，sidecar 就【永远不退出】了——
+                        // 而那正是我们答应用户绝不会发生的事（关了 Excel 就该没了）。
+                        probeFailures++;
+                        if (probeFailures >= MaxProbeFailures)
+                        {
+                            Console.Error.WriteLine("连续 " + probeFailures +
+                                " 次查不到宿主进程状态，保险起见退出。");
+                            server.Shutdown();
+                            return;
+                        }
+                        continue;
+                    }
 
                     if (n > 0) { everSeen = true; continue; }
                     if (!everSeen && DateTime.UtcNow < deadline) { continue; }
@@ -691,6 +714,7 @@ namespace ExcelToolbox.Sidecar
             var t = new Thread(delegate()
             {
                 object app = null;
+                _comScope = new List<object>();
                 try
                 {
                     try
@@ -707,7 +731,10 @@ namespace ExcelToolbox.Sidecar
                 catch (Exception ex) { failure = ex; }
                 finally
                 {
-                    if (app != null) { try { Marshal.ReleaseComObject(app); } catch { } }
+                    // 先放中途拿到的那些，最后才放 app —— 逆序
+                    ReleaseScope();
+                    _comScope = null;
+                    if (app != null) { try { Marshal.FinalReleaseComObject(app); } catch { } }
                 }
             });
             t.SetApartmentState(ApartmentState.STA);
@@ -729,18 +756,47 @@ namespace ExcelToolbox.Sidecar
             return result ?? "{\"ok\":false,\"error\":\"no_result\"}";
         }
 
+        // 【每一个拿到的 COM 对象都要还回去】。
+        // 只释放 app 是不够的：ActiveWorkbook / Queries / 每个 Query /
+        // Connections 都是独立的 RCW。漏掉它们，Excel 进程会被引用吊住——
+        // 表现是【用户关掉 Excel 窗口，进程还在后台赖着】，而且越用越多。
+        [ThreadStatic] private static List<object> _comScope;
+
+        /// <summary>取属性，并把拿到的 COM 对象登记进待释放清单。</summary>
         private static object Get(object target, string name)
         {
             if (target == null) { return null; }
-            return target.GetType().InvokeMember(
+            var v = target.GetType().InvokeMember(
                 name, BindingFlags.GetProperty, null, target, null, CultureInfo.InvariantCulture);
+            Track(v);
+            return v;
+        }
+
+        private static void Track(object v)
+        {
+            if (v == null) { return; }
+            if (!Marshal.IsComObject(v)) { return; }
+            if (_comScope != null) { _comScope.Add(v); }
+        }
+
+        /// <summary>按取得的逆序释放。逆序是因为子对象要先于父对象放掉。</summary>
+        private static void ReleaseScope()
+        {
+            if (_comScope == null) { return; }
+            for (int i = _comScope.Count - 1; i >= 0; i--)
+            {
+                try { Marshal.FinalReleaseComObject(_comScope[i]); } catch { }
+            }
+            _comScope.Clear();
         }
 
         private static object Invoke(object target, string name, params object[] args)
         {
             if (target == null) { return null; }
-            return target.GetType().InvokeMember(
+            var v = target.GetType().InvokeMember(
                 name, BindingFlags.InvokeMethod, null, target, args, CultureInfo.InvariantCulture);
+            Track(v);
+            return v;
         }
 
         private static object TryItem(object collection, string key)
@@ -848,7 +904,16 @@ namespace ExcelToolbox.Sidecar
 
             int contentLength = 0;
             var cl = req.Header("Content-Length");
-            if (!string.IsNullOrEmpty(cl)) { int.TryParse(cl, out contentLength); }
+            if (!string.IsNullOrEmpty(cl))
+            {
+                // 【解析不了就拒绝，不能当成 0】。当成 0 的话请求体被丢掉，
+                // 但请求仍按"没有正文"继续处理——我们和客户端对同一个请求的
+                // 理解就不一致了，这类歧义正是 HTTP 走私类问题的温床。
+                if (!int.TryParse(cl, NumberStyles.None, CultureInfo.InvariantCulture, out contentLength))
+                {
+                    return null;
+                }
+            }
             if (contentLength < 0 || contentLength > maxBodyBytes) { return null; }
 
             if (contentLength > 0)

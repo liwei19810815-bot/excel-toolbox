@@ -346,6 +346,106 @@ try {
     Assert-Equal $false (Test-Path $SidecarTargetDir) "卸载后 sidecar 目录已删除"
 
     #=========================================================================
+    Section "sidecar 装到一半失败：exe 也要回滚"
+
+    # 【怎么注入失败】：在目标位置放一个【名叫 config.json 的目录】。
+    # exe 复制得动，写配置那一步必然抛异常——正好卡在
+    # "新 exe 已就位、配置还没写成"这个最危险的中间态上。
+    #
+    # 这一条守的是一个真实的回滚缺口：原先失败时只还原 config.json，
+    # 不管 exe，于是磁盘上留下【新 exe + 旧配置】这种谁也没验证过的组合。
+
+    # --- 情形一：本来没装过 → 失败后不该留下 exe ---
+    $s2c = New-Stage -WithAI -WithSidecar; $stages += $s2c
+    if (Test-Path $SidecarTargetDir) { Remove-Item $SidecarTargetDir -Recurse -Force }
+    $null = New-Item -ItemType Directory -Path $SidecarTargetDir -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $SidecarTargetDir "config.json") -Force
+
+    $out = Invoke-Installer $s2c "" @()
+    Assert-Match $out "*sidecar 安装失败*" "写配置失败时如实报错"
+    Assert-Equal $false (Test-Path (Join-Path $SidecarTargetDir "ExcelToolboxSidecar.exe")) `
+                 "本来没装过：失败后不留下新复制的 exe"
+    # manifest 里的令牌指向一个装不起来的 sidecar，所以整个 AI 安装都要回滚
+    Assert-Equal 0 (Get-WefEntryCount) "sidecar 失败时，AI 注册项一并回滚"
+
+    Remove-Item (Join-Path $SidecarTargetDir "config.json") -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $SidecarTargetDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    # --- 情形二：升级场景 → 失败后必须还原回原来那个 exe ---
+    $out = Invoke-Installer $s2c "" @()
+    Assert-Match $out "*sidecar 已安装*" "先正常装一次，作为升级的起点"
+
+    $exePath = Join-Path $SidecarTargetDir "ExcelToolboxSidecar.exe"
+    # 往已装好的 exe 里写一个哨兵内容，等下用它判断"有没有被还原回来"
+    $sentinel = "SENTINEL_" + [guid]::NewGuid().ToString("N")
+    [IO.File]::WriteAllText($exePath, $sentinel)
+
+    # 【要先把已有的 config.json 文件删掉】。它这会儿是个正常文件，
+    # 直接 New-Item -ItemType Directory -Force 并不会把文件换成目录，
+    # 陷阱没布上，安装就成功了——而那时断言失败看起来像"回滚没生效"，
+    # 其实是这一步根本没触发失败。
+    Remove-Item (Join-Path $SidecarTargetDir "config.json") -Force -ErrorAction SilentlyContinue
+    $null = New-Item -ItemType Directory -Path (Join-Path $SidecarTargetDir "config.json") -Force
+    $out = Invoke-Installer $s2c "" @()
+    Assert-Match $out "*sidecar 安装失败*" "升级写配置失败时如实报错"
+
+    $after = ""
+    try { $after = [IO.File]::ReadAllText($exePath) } catch { $after = "<读不到>" }
+    Assert-Equal $sentinel $after "升级失败后，exe 被还原成原来那个（不是留下新的）"
+
+    Remove-Item (Join-Path $SidecarTargetDir "config.json") -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $SidecarTargetDir -Recurse -Force -ErrorAction SilentlyContinue
+    $out = Invoke-Installer $s2c "2" @()
+
+    #=========================================================================
+    Section "升级时只停自己那个 sidecar，不碰同名的别人"
+
+    # 安装/升级前要把在跑的 sidecar 停掉（否则 exe 被锁住，覆盖必然失败）。
+    # 【但不能按进程名一刀切】：同名进程可能是另一份安装、
+    # 或终端服务器上另一个用户会话的 sidecar。按名字杀会把别人的干掉，
+    # 而对方只看到"AI 的本地能力忽然没了"，完全查不出是谁干的。
+    #
+    # 这里在【另一个路径】下跑一个同名进程，装一遍，然后断言它还活着。
+    $otherDir = Join-Path ([IO.Path]::GetTempPath()) ("tbother_" + [guid]::NewGuid().ToString("N"))
+    $null = New-Item -ItemType Directory -Path $otherDir -Force
+    $otherExe = Join-Path $otherDir "ExcelToolboxSidecar.exe"
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "dist\ExcelToolboxSidecar.exe") -Destination $otherExe -Force
+
+    $otherCfg = Join-Path $otherDir "config.json"
+    @{ token = ("b" * 64); port = 8931; allowedOrigins = @("https://other.test") } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $otherCfg -Encoding UTF8
+
+    $stray = $null
+    try {
+        $stray = Start-Process -FilePath $otherExe `
+                    -ArgumentList @("--config", $otherCfg) `
+                    -NoNewWindow -PassThru `
+                    -RedirectStandardOutput (Join-Path $otherDir "out.txt") `
+                    -RedirectStandardError  (Join-Path $otherDir "err.txt")
+        try { $null = $stray.Handle } catch { }
+        Start-Sleep -Milliseconds 1200
+        Assert-True (-not $stray.HasExited) "另一路径下的同名 sidecar 已启动（作为旁观者）"
+
+        $s2d = New-Stage -WithAI -WithSidecar; $stages += $s2d
+        $out = Invoke-Installer $s2d "" @()
+        Assert-Match $out "*sidecar 已安装*" "安装照常完成"
+
+        Start-Sleep -Milliseconds 500
+        $stray.Refresh()
+        Assert-True (-not $stray.HasExited) "【没误杀】另一路径下的同名进程仍然活着"
+
+        $out = Invoke-Installer $s2d "2" @()
+        Start-Sleep -Milliseconds 500
+        $stray.Refresh()
+        Assert-True (-not $stray.HasExited) "【没误杀】卸载也不碰别人的同名进程"
+    }
+    finally {
+        if ($stray) { try { if (-not $stray.HasExited) { $stray.Kill() } } catch { } }
+        Start-Sleep -Milliseconds 300
+        Remove-Item -LiteralPath $otherDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    #=========================================================================
     Section "网关地址校验"
 
     $s3 = New-Stage -WithAI -Gateway 'https://bad host&x'; $stages += $s3

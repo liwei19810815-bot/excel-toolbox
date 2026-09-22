@@ -233,13 +233,28 @@ function New-SidecarToken {
 # 只杀我们自己这个名字的进程。
 #-----------------------------------------------------------------------------
 function Stop-RunningSidecar {
+    $target = Join-Path $SidecarTargetDir $SidecarExeName
+    $stopped = 0
     try {
         $procs = @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($SidecarExeName)) -ErrorAction SilentlyContinue)
-        if ($procs.Count -eq 0) { return }
         foreach ($p in $procs) {
-            try { $p.Kill(); $p.WaitForExit(5000) | Out-Null } catch {}
+            # 【只停我们自己这个路径下的那一个，不能按进程名一刀切】。
+            # 同名进程可能是另一份安装、另一个用户会话（终端服务器上很常见）
+            # 的 sidecar。按名字杀会把别人的进程一并干掉，
+            # 而对方只会看到"AI 的本地能力忽然没了"，完全查不出是谁干的。
+            # 这和本脚本对 Excel 的处理是同一条原则：只动自己那一个。
+            $path = $null
+            try { $path = $p.MainModule.FileName } catch { $path = $null }
+
+            # 读不到路径（权限不足，通常意味着那是别人的进程）就【不要动它】。
+            # 宁可让这次升级因为文件被占用而失败并如实报错，
+            # 也不要去杀一个我们无法确认归属的进程。
+            if (-not $path) { continue }
+            if (-not ($path -ieq $target)) { continue }
+
+            try { $p.Kill(); $p.WaitForExit(5000) | Out-Null; $stopped++ } catch {}
         }
-        Say "   已停止正在运行的 sidecar（$($procs.Count) 个）"
+        if ($stopped -gt 0) { Say "   已停止正在运行的 sidecar（$stopped 个）" }
     } catch {}
 }
 
@@ -470,8 +485,9 @@ function Install-AI {
     # 【放在最后】。它是三步里唯一可以整段跳过的，前两步成了就算 AI 装好了。
     # 反过来先装 sidecar 的话，manifest 失败时还得回头删它，白白多一段回滚。
     if ($sidecarToken -ne "") {
-        $sidecarOk = $false
         $cfgPath = Join-Path $SidecarTargetDir "config.json"
+        $exePath = Join-Path $SidecarTargetDir $SidecarExeName
+
         $cfgExistedBefore = Test-Path -LiteralPath $cfgPath
         $cfgBackup = $null
         $hasCfgBackup = $false
@@ -482,6 +498,19 @@ function Install-AI {
             } catch {}
         }
 
+        # 【exe 也要备份】。只备份 config.json 是不够的：
+        # 复制新 exe 成功、后面写配置失败时，回滚只还原了配置，
+        # 磁盘上留下的却是【新 exe + 旧配置】这种谁也没验证过的组合。
+        # 升级场景下这是必然路径，不是边角情况。
+        $exeExistedBefore = Test-Path -LiteralPath $exePath
+        $exeBackup = $null
+        if ($exeExistedBefore) {
+            $exeBackup = Join-Path ([IO.Path]::GetTempPath()) ("tbsidecar_bak_" + [guid]::NewGuid().ToString("N") + ".exe")
+            try { Copy-Item -LiteralPath $exePath -Destination $exeBackup -Force }
+            catch { $exeBackup = $null }
+        }
+        $exeReplaced = $false
+
         try {
             # 升级时 exe 正被占用，不先停就必然覆盖失败
             Stop-RunningSidecar
@@ -491,7 +520,8 @@ function Install-AI {
             }
 
             Copy-Item -LiteralPath (Join-Path $AIDir $SidecarExeName) `
-                      -Destination (Join-Path $SidecarTargetDir $SidecarExeName) -Force
+                      -Destination $exePath -Force
+            $exeReplaced = $true
 
             # 配置里只放 sidecar 自己要用的三样：令牌、端口、允许的来源。
             # 【allowedOrigins 必须是数组】——sidecar 那边两种都收，
@@ -511,7 +541,6 @@ function Install-AI {
                 throw "配置写入后回读不到令牌"
             }
 
-            $sidecarOk = $true
             Good "sidecar 已安装（$SidecarTargetDir）"
         }
         catch {
@@ -527,11 +556,42 @@ function Install-AI {
                 Remove-Item -LiteralPath $cfgPath -Force -ErrorAction SilentlyContinue
             }
 
+            # exe 同理：原先有就还原成原来那个，原先没有才删掉。
+            # 【不还原的话会留下"新 exe + 旧配置"】——一种没人验证过的组合。
+            if ($exeReplaced) {
+                if ($exeExistedBefore -and $exeBackup -and (Test-Path -LiteralPath $exeBackup)) {
+                    try {
+                        Stop-RunningSidecar
+                        Copy-Item -LiteralPath $exeBackup -Destination $exePath -Force
+                        Say "     已还原原来的 sidecar 程序。"
+                    } catch { Warn "还原原 sidecar 程序失败：$($_.Exception.Message)" }
+                }
+                elseif (-not $exeExistedBefore) {
+                    try {
+                        Stop-RunningSidecar
+                        Remove-Item -LiteralPath $exePath -Force -ErrorAction SilentlyContinue
+                        Say "     已回滚本次复制的 sidecar 程序。"
+                    } catch {}
+                }
+            }
+
+            # 目录是这次才建的、而且已经空了，就一并收掉，不留空壳
+            if (-not $cfgExistedBefore -and -not $exeExistedBefore -and (Test-Path -LiteralPath $SidecarTargetDir)) {
+                if (@(Get-ChildItem -LiteralPath $SidecarTargetDir -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+                    Remove-Item -LiteralPath $SidecarTargetDir -Force -ErrorAction SilentlyContinue
+                }
+            }
+
             Undo-AIPartialInstall -RegWritten $regWritten -ManifestPath $manifest `
                                   -ManifestExistedBefore $manifestExistedBefore `
                                   -ManifestBackup $manifestBackup -RegBackup $regBackup `
                                   -HasManifestBackup $hasManifestBackup -HasRegBackup $hasRegBackup
             return $false
+        }
+        finally {
+            if ($exeBackup -and (Test-Path -LiteralPath $exeBackup)) {
+                Remove-Item -LiteralPath $exeBackup -Force -ErrorAction SilentlyContinue
+            }
         }
     }
     else {
