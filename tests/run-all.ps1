@@ -68,6 +68,8 @@ $suites = @(
     @{ Name = "功能区图标";       Script = "check-imagemso.ps1";         Kind = "exit" }
     @{ Name = "帮助覆盖与搜索";   Script = "check-help.ps1";             Kind = "exit" }
     @{ Name = "安装器";           Script = "check-installer.ps1";        Kind = "count" }
+    @{ Name = "sidecar 编译";     Script = "..\build\build-sidecar.ps1"; Kind = "exit" }
+    @{ Name = "sidecar 骨架";     Script = "check-sidecar.ps1";          Kind = "count" }
 )
 
 $results = @()
