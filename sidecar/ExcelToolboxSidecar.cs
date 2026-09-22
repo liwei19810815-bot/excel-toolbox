@@ -55,6 +55,8 @@ using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -82,6 +84,23 @@ namespace ExcelToolbox.Sidecar
             {
                 var opts = Options.Parse(args);
                 if (opts == null) { PrintUsage(); return 2; }
+
+                // 【单实例】。.xlam 每次 Excel 启动都会 Shell() 我们一下，
+                // 不拦的话开几个 Excel 就有几个 sidecar，各占一个端口，
+                // 任务窗格探到哪个全看运气。
+                // 用命名互斥体：抢不到就说明已经有一个在跑，安静退出。
+                if (!string.IsNullOrEmpty(opts.SingleInstanceKey))
+                {
+                    bool createdNew;
+                    // Local\ 前缀 = 每个登录会话各一个。多用户共用一台机器
+                    // （终端服务器）时，各人有各人的 sidecar，互不干扰。
+                    _singleInstanceMutex = new Mutex(true, "Local\\" + opts.SingleInstanceKey, out createdNew);
+                    if (!createdNew)
+                    {
+                        Console.WriteLine("已经有一个 sidecar 在跑，本次不重复启动。");
+                        return 0;
+                    }
+                }
 
                 SidecarConfig cfg;
                 try
@@ -115,6 +134,12 @@ namespace ExcelToolbox.Sidecar
                 // 少了它，sidecar 就变成一个用户看不见也关不掉的常驻进程。
                 if (opts.ParentPid > 0) { WatchParent(opts.ParentPid, server); }
 
+                // 【按宿主进程存活来判定，比盯着某一个 PID 更准】。
+                // 用户常同时开好几个 Excel 窗口。盯着"拉起我的那一个"的话，
+                // 那个先关了 sidecar 就没了，而别的 Excel 还开着——
+                // 表现是"AI 在这个工作簿能用、在那个不能用"，极难排查。
+                if (!string.IsNullOrEmpty(opts.WatchProcess)) { WatchHost(opts.WatchProcess, opts.WatchGraceSeconds, server); }
+
                 server.WaitForShutdown();
                 return 0;
             }
@@ -133,6 +158,38 @@ namespace ExcelToolbox.Sidecar
         internal static int CurrentPid()
         {
             using (var p = Process.GetCurrentProcess()) { return p.Id; }
+        }
+
+        // 互斥体要一直拿在手里，进程活多久它活多久。
+        // 【不能是局部变量】——那样会被 GC 回收，互斥体提前释放，单实例就失效了。
+        private static Mutex _singleInstanceMutex;
+
+        private static void WatchHost(string processName, int graceSeconds, SidecarServer server)
+        {
+            var t = new Thread(delegate()
+            {
+                // 启动时宿主可能还没起来（.xlam 加载得比 Excel 窗口早），
+                // 所以给一段宽限期，别刚起来就把自己关了。
+                var deadline = DateTime.UtcNow.AddSeconds(graceSeconds);
+                bool everSeen = false;
+
+                while (true)
+                {
+                    Thread.Sleep(2000);
+                    int n = 0;
+                    try { n = Process.GetProcessesByName(processName).Length; }
+                    catch { n = 1; }   // 查不到就当它还在，宁可多活一会儿也别误杀
+
+                    if (n > 0) { everSeen = true; continue; }
+                    if (!everSeen && DateTime.UtcNow < deadline) { continue; }
+
+                    Console.WriteLine(processName + " 已全部退出，sidecar 跟着退出。");
+                    server.Shutdown();
+                    return;
+                }
+            });
+            t.IsBackground = true;
+            t.Start();
         }
 
         private static void WatchParent(int parentPid, SidecarServer server)
@@ -167,6 +224,14 @@ namespace ExcelToolbox.Sidecar
         public string ConfigPath;
         public int ParentPid;
         public int Port;
+        public string WatchProcess;      // 这个名字的进程一个都不剩时退出
+
+        // 宿主还没起来时的宽限秒数。
+        // 【这是给测试留的缝】，默认值就是生产行为——和安装器的 -WefRoot 一个路子。
+        // 不留这条缝的话，"宿主进程消失就退出"这条只能靠等满 30 秒来验证，
+        // 慢到没人愿意把它放进回归里，于是就不会有人测它。
+        public int WatchGraceSeconds = 30;
+        public string SingleInstanceKey; // 同一个 key 只允许跑一个
 
         public static Options Parse(string[] args)
         {
@@ -177,6 +242,9 @@ namespace ExcelToolbox.Sidecar
                 if (a == "--config" && i + 1 < args.Length) { o.ConfigPath = args[++i]; }
                 else if (a == "--parent-pid" && i + 1 < args.Length) { o.ParentPid = ParseInt(args[++i]); }
                 else if (a == "--port" && i + 1 < args.Length) { o.Port = ParseInt(args[++i]); }
+                else if (a == "--watch-process" && i + 1 < args.Length) { o.WatchProcess = args[++i]; }
+                else if (a == "--single-instance" && i + 1 < args.Length) { o.SingleInstanceKey = args[++i]; }
+                else if (a == "--watch-grace-seconds" && i + 1 < args.Length) { o.WatchGraceSeconds = ParseInt(args[++i]); }
                 else { return null; }
             }
             if (string.IsNullOrEmpty(o.ConfigPath)) { return null; }
@@ -417,8 +485,52 @@ namespace ExcelToolbox.Sidecar
                     return;
                 }
 
+                // 列出工作簿里的查询。只读，不刷新任何东西。
+                if (req.Method == "GET" && req.Path == "/queries")
+                {
+                    Write(stream, 200, corsOrigin, ExcelBridge.ListQueries());
+                    return;
+                }
+
+                // 刷新查询。
+                // 【只接受查询的名字，不接受任何代码或 M 表达式】。
+                // 要什么能力就在这里加一条具体路由——通用执行口子一开，
+                // 风险就从"几个动作"变成"任意代码执行"。
+                if (req.Method == "POST" && req.Path == "/refresh-query")
+                {
+                    string name = ExtractJsonString(req.Body, "name");
+                    if (string.IsNullOrEmpty(name))
+                    {
+                        Write(stream, 400, corsOrigin, "{\"error\":\"missing_name\"}");
+                        return;
+                    }
+                    Write(stream, 200, corsOrigin, ExcelBridge.RefreshQuery(name));
+                    return;
+                }
+
                 Write(stream, 404, corsOrigin, "{\"error\":\"not_found\"}");
             }
+        }
+
+        /// <summary>
+        /// 从请求体里取一个字符串字段。
+        /// 用 JavaScriptSerializer，不手搓解析——手搓的 JSON 解析器是 bug 温床。
+        /// </summary>
+        private static string ExtractJsonString(string body, string key)
+        {
+            if (string.IsNullOrEmpty(body)) { return null; }
+            try
+            {
+                var ser = new JavaScriptSerializer();
+                var map = ser.Deserialize<Dictionary<string, object>>(body);
+                object v;
+                if (map != null && map.TryGetValue(key, out v) && v != null)
+                {
+                    return Convert.ToString(v, CultureInfo.InvariantCulture);
+                }
+            }
+            catch { }
+            return null;
         }
 
         private bool Authorized(HttpRequest req)
@@ -489,6 +601,175 @@ namespace ExcelToolbox.Sidecar
                 case 404: return "Not Found";
                 default: return "Error";
             }
+        }
+    }
+
+    //=========================================================================
+    // Excel 桥
+    //
+    // 【必须挂到用户正开着的那个 Excel 上，绝不能自己新开一个】。
+    // 新开一个进程的话，刷新的是一个空白工作簿——用户点了"刷新"，
+    // 界面上什么都没变，也没有任何报错。Marshal.GetActiveObject 拿的是
+    // 运行中的实例；拿不到就如实说 Excel 没开。
+    //
+    // 【全部用后期绑定】。引用 Microsoft.Office.Interop.Excel 要求编译机
+    // 装了对应版本的 PIA，而且【版本一变就对不上】。反射调 IDispatch
+    // 没有这个问题，代价是写起来啰嗦、没有编译期检查。
+    //=========================================================================
+    internal static class ExcelBridge
+    {
+        public static string ListQueries()
+        {
+            return RunOnSta(delegate(object app)
+            {
+                object wb = Get(app, "ActiveWorkbook");
+                if (wb == null) { return "{\"ok\":false,\"error\":\"no_workbook\"}"; }
+
+                var names = new List<string>();
+                object queries = Get(wb, "Queries");
+                if (queries != null)
+                {
+                    int count = Convert.ToInt32(Get(queries, "Count"), CultureInfo.InvariantCulture);
+                    for (int i = 1; i <= count; i++)
+                    {
+                        object q = Invoke(queries, "Item", i);
+                        if (q == null) { continue; }
+                        names.Add(Convert.ToString(Get(q, "Name"), CultureInfo.InvariantCulture));
+                    }
+                }
+
+                var sb = new StringBuilder();
+                sb.Append("{\"ok\":true,\"queries\":[");
+                for (int i = 0; i < names.Count; i++)
+                {
+                    if (i > 0) { sb.Append(','); }
+                    sb.Append('"').Append(JsonEscape(names[i])).Append('"');
+                }
+                sb.Append("]}");
+                return sb.ToString();
+            });
+        }
+
+        public static string RefreshQuery(string name)
+        {
+            return RunOnSta(delegate(object app)
+            {
+                object wb = Get(app, "ActiveWorkbook");
+                if (wb == null) { return "{\"ok\":false,\"error\":\"no_workbook\"}"; }
+
+                object connections = Get(wb, "Connections");
+                if (connections == null) { return "{\"ok\":false,\"error\":\"no_connections\"}"; }
+
+                // Power Query 建出来的连接叫「Query - <查询名>」。
+                // 两种名字都认一下，省得因为版本差异找不到。
+                object target = TryItem(connections, "Query - " + name);
+                if (target == null) { target = TryItem(connections, name); }
+
+                if (target == null)
+                {
+                    return "{\"ok\":false,\"error\":\"query_not_found\",\"name\":\"" + JsonEscape(name) + "\"}";
+                }
+
+                Invoke(target, "Refresh");
+                return "{\"ok\":true,\"refreshed\":\"" + JsonEscape(name) + "\"}";
+            });
+        }
+
+        //---------------------------------------------------------------------
+        // 【COM 调用放到专用的 STA 线程上】。
+        // 请求是在线程池线程（MTA）上处理的，从 MTA 直接打 Excel 的
+        // IDispatch 要跨套间封送，时灵时不灵——而且失败方式很难看：
+        // 偶发的 RPC_E_* 错误，重试一次又好了。专门起一个 STA 线程做这件事。
+        //---------------------------------------------------------------------
+        private delegate string ExcelWork(object app);
+
+        private static string RunOnSta(ExcelWork work)
+        {
+            string result = null;
+            Exception failure = null;
+
+            var t = new Thread(delegate()
+            {
+                object app = null;
+                try
+                {
+                    try
+                    {
+                        app = Marshal.GetActiveObject("Excel.Application");
+                    }
+                    catch (COMException)
+                    {
+                        result = "{\"ok\":false,\"error\":\"excel_not_running\"}";
+                        return;
+                    }
+                    result = work(app);
+                }
+                catch (Exception ex) { failure = ex; }
+                finally
+                {
+                    if (app != null) { try { Marshal.ReleaseComObject(app); } catch { } }
+                }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.IsBackground = true;
+            t.Start();
+
+            // 【必须有上限】。Excel 弹了个模态对话框的话，COM 调用会一直挂着，
+            // 那条连接就永远不回包了。超时后如实回错，别让任务窗格干等。
+            if (!t.Join(TimeSpan.FromSeconds(60)))
+            {
+                return "{\"ok\":false,\"error\":\"timeout\",\"hint\":\"Excel 可能正弹着对话框\"}";
+            }
+
+            if (failure != null)
+            {
+                return "{\"ok\":false,\"error\":\"com_failed\",\"message\":\"" +
+                       JsonEscape(failure.Message) + "\"}";
+            }
+            return result ?? "{\"ok\":false,\"error\":\"no_result\"}";
+        }
+
+        private static object Get(object target, string name)
+        {
+            if (target == null) { return null; }
+            return target.GetType().InvokeMember(
+                name, BindingFlags.GetProperty, null, target, null, CultureInfo.InvariantCulture);
+        }
+
+        private static object Invoke(object target, string name, params object[] args)
+        {
+            if (target == null) { return null; }
+            return target.GetType().InvokeMember(
+                name, BindingFlags.InvokeMethod, null, target, args, CultureInfo.InvariantCulture);
+        }
+
+        private static object TryItem(object collection, string key)
+        {
+            // 取不到会抛，而"取不到"恰恰是正常分支——不能让它冒到上面去
+            try { return Invoke(collection, "Item", key); }
+            catch { return null; }
+        }
+
+        private static string JsonEscape(string s)
+        {
+            if (string.IsNullOrEmpty(s)) { return ""; }
+            var sb = new StringBuilder(s.Length + 8);
+            foreach (char c in s)
+            {
+                switch (c)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < 32) { sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture)); }
+                        else { sb.Append(c); }
+                        break;
+                }
+            }
+            return sb.ToString();
         }
     }
 

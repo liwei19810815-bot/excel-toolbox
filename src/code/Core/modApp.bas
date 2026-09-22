@@ -35,6 +35,14 @@ Public Sub App_Startup()
     modTelemetry.FlushOnStartup
     Err.Clear
     On Error GoTo 0
+
+    ' 拉起 sidecar 伴生进程（没装这个组件就什么都不做）。
+    ' 同样包在错误保护里，理由同上：它失败只影响几个 AI 能力，
+    ' 不能让它把加载宏的启动打断。
+    On Error Resume Next
+    modSidecar.Sidecar_EnsureRunning
+    Err.Clear
+    On Error GoTo 0
 End Sub
 
 '------------------------------------------------------------------------------

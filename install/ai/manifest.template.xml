@@ -5,6 +5,7 @@
   【这是模板，不是能直接用的 manifest】。安装脚本会替换两个占位符：
 
       {{USER}}      当前登录用户名（已做 URL 编码）
+      {{SIDECAR_TOKEN}}  sidecar 令牌；没装 sidecar 组件时为空串
       {{GATEWAY}}   内网网关地址，读自同目录的 gateway.txt
 
   为什么要按用户生成一份：Office.js 的任务窗格是沙箱网页，
@@ -56,7 +57,7 @@
 
   <!-- 身份就是靠这里的 ?u= 传进去的 -->
   <DefaultSettings>
-    <SourceLocation DefaultValue="{{GATEWAY}}/taskpane/index.html?u={{USER}}"/>
+    <SourceLocation DefaultValue="{{GATEWAY}}/taskpane/index.html?u={{USER}}&amp;sidecar={{SIDECAR_TOKEN}}"/>
   </DefaultSettings>
 
   <!-- ReadWriteDocument：读写单元格、格式、图表所必需 -->
@@ -107,7 +108,7 @@
       </bt:Images>
       <bt:Urls>
         <bt:Url id="Commands.Url" DefaultValue="{{GATEWAY}}/commands/commands.html"/>
-        <bt:Url id="Taskpane.Url" DefaultValue="{{GATEWAY}}/taskpane/index.html?u={{USER}}"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="{{GATEWAY}}/taskpane/index.html?u={{USER}}&amp;sidecar={{SIDECAR_TOKEN}}"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="Group.Label" DefaultValue="工具箱 AI"/>

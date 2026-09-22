@@ -193,6 +193,56 @@ function Test-AIPackagePresent {
     return (Test-Path (Join-Path $AIDir "manifest.template.xml"))
 }
 
+#-----------------------------------------------------------------------------
+# sidecar 伴生进程
+#
+# 它干的是 Office.js 任务窗格【做不到】的事（刷新 Power Query、数据模型、
+# 调用工作簿里的宏）。由 .xlam 在 Excel 启动时拉起，关 Excel 就跟着退出——
+# 不用开机自启、不用常驻、不用托盘图标。
+#
+# 【它是可选组件】。分发包里没有 exe 就整段跳过，AI 其余功能照常。
+#-----------------------------------------------------------------------------
+$SidecarExeName   = "ExcelToolboxSidecar.exe"
+$SidecarTargetDir = Join-Path $env:LOCALAPPDATA "ExcelToolbox\sidecar"
+
+function Test-SidecarPackagePresent {
+    return (Test-Path (Join-Path $AIDir $SidecarExeName))
+}
+
+#-----------------------------------------------------------------------------
+# 生成 256 位令牌。
+#
+# 【必须用加密安全的随机源】。Get-Random 走的是可预测的伪随机数发生器，
+# 种子空间小到可以枚举——而这个令牌是整套防护的支点：
+# 127.0.0.1 对本机所有浏览器进程都可达，令牌能被猜到，
+# 任意一个网页就能驱动用户的 Excel。
+#-----------------------------------------------------------------------------
+function New-SidecarToken {
+    $bytes = New-Object byte[] 32
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return (-join ($bytes | ForEach-Object { $_.ToString("x2") }))
+}
+
+#-----------------------------------------------------------------------------
+# 装 exe 之前必须先把在跑的那个停掉。
+#
+# 【不停就会失败】：sidecar 正在运行时它的 exe 被系统锁住，
+# 覆盖会抛"正由另一进程使用"。升级场景下这是必然发生的，不是边角情况。
+#
+# 只杀我们自己这个名字的进程。
+#-----------------------------------------------------------------------------
+function Stop-RunningSidecar {
+    try {
+        $procs = @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($SidecarExeName)) -ErrorAction SilentlyContinue)
+        if ($procs.Count -eq 0) { return }
+        foreach ($p in $procs) {
+            try { $p.Kill(); $p.WaitForExit(5000) | Out-Null } catch {}
+        }
+        Say "   已停止正在运行的 sidecar（$($procs.Count) 个）"
+    } catch {}
+}
+
 # 【判据不能只看目录】。工具箱卸载会删掉整个 %LOCALAPPDATA%\ExcelToolbox，
 # 而 AI 的 manifest 就在它的子目录里。只看目录的话，删完缓存之后
 # 这里就判成"没装过"，AI 的注册表项再也没人清——Excel 会留下一个
@@ -358,8 +408,17 @@ function Install-AI {
     $user = $env:USERNAME
     $userEnc = [uri]::EscapeDataString($user)
 
+    # sidecar 的令牌要【在这里就定下来】——它得随 manifest 的 URL 一起发给
+    # 任务窗格（复用 ?u= 那条已验证可行的路子）。
+    #
+    # 【没有 sidecar 组件时令牌留空】。任务窗格看到空令牌就完全不去探它，
+    # 既不会尝试连接，也不会报错——这是"安静降级"，不是故障。
+    $sidecarToken = ""
+    if (Test-SidecarPackagePresent) { $sidecarToken = New-SidecarToken }
+
     try {
-        $xml = $tplText.Replace("{{USER}}", $userEnc).Replace("{{GATEWAY}}", $gateway)
+        $xml = $tplText.Replace("{{USER}}", $userEnc).Replace("{{GATEWAY}}", $gateway).
+                        Replace("{{SIDECAR_TOKEN}}", $sidecarToken)
 
         # 替换完必须还是合法 XML。这一步是最后一道闸：
         # 上面校验的是网关地址，用户名走了 URL 编码，理论上都安全，
@@ -406,7 +465,80 @@ function Install-AI {
         return $false
     }
 
-    # --- 3. 证书？不装。 ---
+    # --- 3. sidecar 伴生进程（可选组件）---
+    #
+    # 【放在最后】。它是三步里唯一可以整段跳过的，前两步成了就算 AI 装好了。
+    # 反过来先装 sidecar 的话，manifest 失败时还得回头删它，白白多一段回滚。
+    if ($sidecarToken -ne "") {
+        $sidecarOk = $false
+        $cfgPath = Join-Path $SidecarTargetDir "config.json"
+        $cfgExistedBefore = Test-Path -LiteralPath $cfgPath
+        $cfgBackup = $null
+        $hasCfgBackup = $false
+        if ($cfgExistedBefore) {
+            try {
+                $cfgBackup = [IO.File]::ReadAllText($cfgPath, [Text.UTF8Encoding]::new($false))
+                $hasCfgBackup = $true
+            } catch {}
+        }
+
+        try {
+            # 升级时 exe 正被占用，不先停就必然覆盖失败
+            Stop-RunningSidecar
+
+            if (-not (Test-Path $SidecarTargetDir)) {
+                $null = New-Item -ItemType Directory -Path $SidecarTargetDir -Force
+            }
+
+            Copy-Item -LiteralPath (Join-Path $AIDir $SidecarExeName) `
+                      -Destination (Join-Path $SidecarTargetDir $SidecarExeName) -Force
+
+            # 配置里只放 sidecar 自己要用的三样：令牌、端口、允许的来源。
+            # 【allowedOrigins 必须是数组】——sidecar 那边两种都收，
+            # 但写成数组语义最清楚。
+            $cfg = [ordered]@{
+                token          = $sidecarToken
+                port           = 8899
+                allowedOrigins = @($gateway)
+            }
+            $json = $cfg | ConvertTo-Json -Depth 5
+            [IO.File]::WriteAllText($cfgPath, $json, [Text.UTF8Encoding]::new($false))
+
+            # 【写完要回读核对】。令牌写坏了的表现是任务窗格一直 401，
+            # 而那个现象看起来像"sidecar 没起来"，排查方向完全跑偏。
+            $back = [IO.File]::ReadAllText($cfgPath, [Text.UTF8Encoding]::new($false))
+            if ($back -notmatch [regex]::Escape($sidecarToken)) {
+                throw "配置写入后回读不到令牌"
+            }
+
+            $sidecarOk = $true
+            Good "sidecar 已安装（$SidecarTargetDir）"
+        }
+        catch {
+            Bad "sidecar 安装失败：$($_.Exception.Message)"
+
+            # 【manifest 里的令牌已经发出去了，必须一起回滚】。
+            # 只把 sidecar 留一半、manifest 却带着一个连不上的令牌，
+            # 任务窗格会一直去探一个不存在的服务——比干脆没有更糟。
+            if ($hasCfgBackup) {
+                try { [IO.File]::WriteAllText($cfgPath, $cfgBackup, [Text.UTF8Encoding]::new($false)) } catch {}
+            }
+            elseif (-not $cfgExistedBefore -and (Test-Path -LiteralPath $cfgPath)) {
+                Remove-Item -LiteralPath $cfgPath -Force -ErrorAction SilentlyContinue
+            }
+
+            Undo-AIPartialInstall -RegWritten $regWritten -ManifestPath $manifest `
+                                  -ManifestExistedBefore $manifestExistedBefore `
+                                  -ManifestBackup $manifestBackup -RegBackup $regBackup `
+                                  -HasManifestBackup $hasManifestBackup -HasRegBackup $hasRegBackup
+            return $false
+        }
+    }
+    else {
+        Say "   分发包里没有 sidecar 组件，跳过（AI 其余功能不受影响）。"
+    }
+
+    # --- 4. 证书？不装。 ---
     #
     # 【本安装程序不碰证书存储】。
     #
@@ -516,6 +648,19 @@ function Uninstall-AI {
         Remove-Item -LiteralPath $AITargetDir -Recurse -Force -ErrorAction SilentlyContinue
         if (Test-Path $AITargetDir) { Warn "目录删除失败：$AITargetDir" } else { Good "已删除 $AITargetDir" }
     } else { Good "目录本来就不存在" }
+
+    # sidecar
+    #
+    # 【必须先把进程停掉再删】。它正在跑的时候 exe 被锁住，
+    # 删除会静默失败，留下一个还在监听端口的残留进程——
+    # 而用户以为已经卸干净了。
+    if (Test-Path $SidecarTargetDir) {
+        Stop-RunningSidecar
+        Remove-Item -LiteralPath $SidecarTargetDir -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $SidecarTargetDir) {
+            Warn "sidecar 目录删除失败：$SidecarTargetDir"
+        } else { Good "已删除 $SidecarTargetDir" }
+    } else { Good "sidecar 本来就没装" }
 
     # 【证书存储从头到尾没碰过】：安装时就没装任何证书，卸载自然也不用删。
     # 网关证书是 IT 统一管理的，和这个加载项的生命周期无关。

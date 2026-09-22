@@ -262,7 +262,32 @@ if ($withAI) {
     if ($tplText -match '7b2e4c91-6a38-4d5f-9e10-3c8a5f2d6b47') {
         Write-Warn "manifest 模板里还是示例 GUID。正式分发前请换成你自己的（见 install\ai\README.txt）。"
     }
-    Write-Ok "ai 组件已就位（manifest 模板 + gateway.txt）"
+
+    # --- sidecar 伴生进程 ---
+    #
+    # 【每次都重新编译】，不复用 dist\ 里可能是上周的那个。
+    # 编译只要一两秒，而发一个陈旧的 exe 出去的代价是：用户装上了，
+    # 行为却和当前源码对不上——这种问题在现场几乎不可能定位。
+    $sidecarExe = Join-Path $DistDir "ExcelToolboxSidecar.exe"
+    & powershell -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $PSScriptRoot "build-sidecar.ps1") | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Add-Problem "sidecar 编译失败，包里不会带这个组件。"
+    }
+    elseif (-not (Test-Path -LiteralPath $sidecarExe)) {
+        Add-Problem "sidecar 编译报成功，但找不到 $sidecarExe。"
+    }
+    else {
+        Copy-Item -LiteralPath $sidecarExe -Destination $aiOut
+        Write-Ok "ai 组件已就位（manifest 模板 + gateway.txt + sidecar）"
+    }
+
+    # manifest 模板必须带 sidecar 令牌占位符，否则安装器替换不上，
+    # 装出来的 manifest 里会留着字面量 {{SIDECAR_TOKEN}}——
+    # 任务窗格拿它当令牌去探，永远 401。
+    if ($tplText -notmatch '\{\{SIDECAR_TOKEN\}\}') {
+        Add-Problem "manifest 模板里没有 {{SIDECAR_TOKEN}} 占位符，sidecar 令牌发不出去。"
+    }
 }
 
 #-----------------------------------------------------------------------------
@@ -322,12 +347,38 @@ if ($withAI) {
     # 占位符替换后必须还是合法 XML，否则 Office 静默不加载。
     # 这里先用打包时的网关值试算一遍——真正的替换在用户机器上做，
     # 但网关是现在定下的，能在这儿就把它验了。
-    $probe = $tplText.Replace("{{USER}}", "packtest").Replace("{{GATEWAY}}", $Gateway)
+    # 替换用的令牌要用【真实形状】的值（64 个十六进制字符），
+    # 而不是随便一个短字符串——形状不对就试不出"拼进 URL 会不会坏"。
+    $probe = $tplText.Replace("{{USER}}", "packtest").Replace("{{GATEWAY}}", $Gateway).
+                      Replace("{{SIDECAR_TOKEN}}", ("a" * 64))
     try {
         [void]([xml]$probe)
         Write-Ok "用这个网关地址替换后，manifest 仍是合法 XML"
     } catch {
         Add-Problem "用这个网关地址替换后 manifest 不是合法 XML：$($_.Exception.Message)"
+    }
+
+    # 替换完不能还剩占位符。漏一个的后果是任务窗格拿字面量
+    # 「{{SIDECAR_TOKEN}}」当令牌去探，永远 401，而现象看起来像 sidecar 没起来。
+    if ($probe -match '\{\{[A-Z_]+\}\}') {
+        Add-Problem "manifest 替换后仍残留占位符：$($Matches[0])"
+    } else {
+        Write-Ok "manifest 占位符已全部替换"
+    }
+
+    # sidecar 得是个真的 PE 可执行文件。
+    # 【文件在不等于能跑】——编译中断、杀毒软件截断都会留下一个长度可观
+    # 但根本不是 exe 的文件，而那时用户看到的只是"AI 少了几个功能"。
+    $sidecarInPkg = Join-Path $stageDir "ai\$([IO.Path]::GetFileName($sidecarExe))"
+    if (Test-Path -LiteralPath $sidecarInPkg) {
+        $sb = [IO.File]::ReadAllBytes($sidecarInPkg)
+        if ($sb.Length -lt 4096 -or $sb[0] -ne 0x4D -or $sb[1] -ne 0x5A) {
+            Add-Problem "包里的 sidecar 不是有效的 exe（大小 $($sb.Length) 字节）。"
+        } else {
+            Write-Ok "sidecar 是有效的 exe（$([math]::Round($sb.Length / 1KB, 1)) KB）"
+        }
+    } else {
+        Add-Problem "包里缺少 sidecar 可执行文件。"
     }
 
     $gw = [IO.File]::ReadAllText((Join-Path $stageDir "ai\gateway.txt"), [Text.UTF8Encoding]::new($false))

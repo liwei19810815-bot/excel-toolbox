@@ -66,7 +66,7 @@ function New-Config([string]$name, [string]$token, [int]$port, [string[]]$origin
 
 $script:Started = @()
 
-function Start-Sidecar([string]$configPath, [int]$parentPid, [int]$portOverride) {
+function Start-Sidecar([string]$configPath, [int]$parentPid, [int]$portOverride, [string[]]$Extra) {
     $stdout = Join-Path $Stage ("out_" + [guid]::NewGuid().ToString("N") + ".txt")
     $stderr = $stdout -replace "^out_", "err_"
     $stderr = Join-Path $Stage ("err_" + (Split-Path $stdout -Leaf))
@@ -74,6 +74,7 @@ function Start-Sidecar([string]$configPath, [int]$parentPid, [int]$portOverride)
     $a = @("--config", $configPath)
     if ($parentPid -gt 0)   { $a += @("--parent-pid", "$parentPid") }
     if ($portOverride -gt 0) { $a += @("--port", "$portOverride") }
+    if ($Extra) { $a += $Extra }
 
     $p = Start-Process -FilePath $Exe -ArgumentList $a -NoNewWindow -PassThru `
                        -RedirectStandardOutput $stdout -RedirectStandardError $stderr
@@ -122,7 +123,7 @@ function Stop-Sidecar($s) {
 function Invoke-Sidecar {
     param(
         [int]$Port, [string]$Path = "/health", [string]$Method = "GET",
-        [string]$Token, [string]$Origin
+        [string]$Token, [string]$Origin, [string]$Body
     )
     $url = "http://127.0.0.1:$Port$Path"
     try {
@@ -132,6 +133,15 @@ function Invoke-Sidecar {
         $req.Proxy = $null            # 别让系统代理把回环请求绕出去
         if ($Token)  { $req.Headers.Add("X-Toolbox-Token", $Token) }
         if ($Origin) { $req.Headers.Add("Origin", $Origin) }
+
+        if ($PSBoundParameters.ContainsKey('Body')) {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($Body)
+            $req.ContentType = "application/json"
+            $req.ContentLength = $bytes.Length
+            $rs = $req.GetRequestStream()
+            $rs.Write($bytes, 0, $bytes.Length)
+            $rs.Close()
+        }
 
         $resp = $req.GetResponse()
         $code = [int]$resp.StatusCode
@@ -275,6 +285,68 @@ try {
     Assert-Equal 404 $r.Status "没有通用执行口子"
 
     #==========================================================================
+    Section "能力接口：白名单式，不接受代码"
+    #==========================================================================
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/queries" -Token $Token
+    Assert-Equal 200 $r.Status "/queries 带令牌可用"
+    Assert-True ($r.Body -match '"ok"') "/queries 返回结构化结果"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/queries"
+    Assert-Equal 401 $r.Status "/queries 不带令牌：401"
+
+    # 刷新必须指名道姓。不给名字就拒绝——这是"只暴露具体动作"的体现。
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/refresh-query" -Method "POST" -Token $Token -Body '{}'
+    Assert-Equal 400 $r.Status "刷新不给查询名：400"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/refresh-query" -Method "POST" -Body '{"name":"x"}'
+    Assert-Equal 401 $r.Status "刷新不带令牌：401"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/refresh-query" -Method "POST" -Token $Token -Body '{"name":"NoSuchQuery_xyz"}'
+    Assert-Equal 200 $r.Status "刷新请求本身被受理"
+    # Excel 没开就该如实说 Excel 没开；开着但没这个查询就该说找不到。
+    # 【两种都不能报成成功】——报成功的话用户点了刷新什么也没发生，却以为好了。
+    Assert-True ($r.Body -match 'excel_not_running|query_not_found|no_workbook') `
+                "不存在的查询不会被报成刷新成功"
+
+    # 【这里不要停掉 $sc】。下面"只绑回环"那节要连它的端口，
+    # 进程没了的话连接当然失败，那条断言就会【因为错误的原因变绿】——
+    # 它本该证明的是"绑了回环所以外网连不上"，而不是"服务根本没在跑"。
+
+    #==========================================================================
+    Section "单实例：开几个 Excel 也只该有一个 sidecar"
+    #==========================================================================
+    $cfgSi = New-Config "single.json" $Token 8961 @($GoodOrigin)
+    $key = "TbSidecarTest_" + [guid]::NewGuid().ToString("N").Substring(0, 8)
+    $first = Start-Sidecar $cfgSi 0 0 @("--single-instance", $key)
+    Assert-True ($first.Port -gt 0) "第一个实例正常启动"
+
+    $second = Start-Sidecar $cfgSi 0 0 @("--single-instance", $key)
+    Assert-True ($second.Process.HasExited) "第二个实例没有占住端口"
+    Assert-Equal 0 (Get-ExitCode $second) "第二个实例安静退出（退出码 0，不是报错）"
+
+    $r = Invoke-Sidecar -Port $first.Port -Token $Token
+    Assert-Equal 200 $r.Status "第一个实例仍然正常服务"
+    Stop-Sidecar $first
+    Stop-Sidecar $second
+
+    #==========================================================================
+    Section "跟随宿主：Excel 全退了就自己退"
+    #==========================================================================
+    # 用一个不存在的进程名 + 1 秒宽限，等价于"宿主从来没出现过"。
+    # 这条守的是"用户关掉所有 Excel 之后 sidecar 不该赖着不走"。
+    $cfgW = New-Config "watch.json" $Token 8966 @($GoodOrigin)
+    $w = Start-Sidecar $cfgW 0 0 @("--watch-process", "NoSuchHost_xyz", "--watch-grace-seconds", "1")
+    Assert-True ($w.Port -gt 0) "带 --watch-process 时正常启动"
+
+    $gone = $false
+    for ($i = 0; $i -lt 40; $i++) {
+        if ($w.Process.HasExited) { $gone = $true; break }
+        Start-Sleep -Milliseconds 250
+    }
+    Assert-True $gone "宿主进程一个都不剩时，sidecar 自己退出"
+    Stop-Sidecar $w
+
+    #==========================================================================
     Section "只绑回环：从本机的非回环地址连不上"
     #==========================================================================
     $lanIps = @(
@@ -297,6 +369,11 @@ try {
         } catch { $reachable = $false }
         Assert-Equal $false $reachable "从 $ip 连不上（没有绑到全部网卡）"
     }
+
+    # 【先确认它在这一刻确实还活着】，否则上面那条"连不上"可能只是
+    # 因为进程早退了，而不是因为绑的是回环。
+    $r = Invoke-Sidecar -Port $sc.Port -Token $Token
+    Assert-Equal 200 $r.Status "同一时刻从 127.0.0.1 连得上（证明上一条不是因为进程没了）"
 
     Stop-Sidecar $sc
 

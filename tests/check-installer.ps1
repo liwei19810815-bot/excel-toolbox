@@ -46,6 +46,7 @@ if (-not (Test-Path $Xlam)) { throw "找不到 $Xlam。请先运行 build\build.
 $AddInsDir    = Join-Path $env:APPDATA "Microsoft\AddIns"
 $CacheDir     = Join-Path $env:LOCALAPPDATA "ExcelToolbox"
 $AITargetDir  = Join-Path $CacheDir "ai"
+$SidecarTargetDir = Join-Path $CacheDir "sidecar"
 # 【测试一律走自己的 WEF 键，不碰用户真实的那个】。
 # 安装脚本的 -WefRoot 就是为此留的测试缝（默认值即生产行为）。
 # 这样即使断言失败、清理没跑完，用户 Office 里真实的加载项注册也毫发无损。
@@ -109,7 +110,7 @@ function Get-WefEntryCount {
 }
 
 # 夹具：一个模拟的分发包
-function New-Stage([switch]$WithAI, [string]$Gateway = "https://192.168.1.50:8443") {
+function New-Stage([switch]$WithAI, [switch]$WithSidecar, [string]$Gateway = "https://192.168.1.50:8443") {
     $stage = Join-Path ([IO.Path]::GetTempPath()) ("tbinst_" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $stage | Out-Null
     Copy-Item (Join-Path $InstallDir "Install-Toolbox.ps1") $stage
@@ -121,6 +122,16 @@ function New-Stage([switch]$WithAI, [string]$Gateway = "https://192.168.1.50:844
         Copy-Item (Join-Path $InstallDir "ai\manifest.template.xml") $ai
         Set-Content -LiteralPath (Join-Path $ai "gateway.txt") -Value $Gateway -Encoding UTF8
         # 【不放 ca.crt】：安装程序已经不装证书了，分发包里也不该再有它。
+
+        # sidecar 是【可选】组件。不放它的夹具专门用来验证
+        # "没有 sidecar 时 AI 其余部分照常装、manifest 里的令牌留空"。
+        if ($WithSidecar) {
+            $sidecarSrc = Join-Path $RepoRoot "dist\ExcelToolboxSidecar.exe"
+            if (-not (Test-Path $sidecarSrc)) {
+                throw "找不到 $sidecarSrc。请先运行 build\build-sidecar.ps1。"
+            }
+            Copy-Item -LiteralPath $sidecarSrc -Destination $ai
+        }
     }
     return $stage
 }
@@ -267,6 +278,16 @@ try {
     Assert-Match $out "*示例 GUID*" "示例 GUID 触发告警"
 
     #=========================================================================
+    Section "没有 sidecar 组件时：AI 其余部分照常，令牌留空"
+
+    # 这条守的是"可选组件变成必需组件"。个人从 GitHub 下的包、
+    # 或者 IT 有意不发 sidecar 的包，都走这条路——它不能报错。
+    $mxNoSidecar = Get-Content -LiteralPath (Join-Path $AITargetDir "manifest.xml") -Raw -Encoding UTF8
+    Assert-Match $mxNoSidecar "*sidecar=*"        "manifest 里有 sidecar 参数"
+    Assert-True ($mxNoSidecar -match 'sidecar=(&|")') "没装 sidecar 时令牌为空串"
+    Assert-Equal $false (Test-Path $SidecarTargetDir) "没装 sidecar 时不创建它的目录"
+
+    #=========================================================================
     Section "全部卸载：清干净，且不碰别人的东西"
 
     $out = Invoke-Installer $s2 "2" @()
@@ -283,6 +304,46 @@ try {
     } else {
         Write-Host "  跳过  本机原本就没有 WEF 缓存目录，无法验证误删" -ForegroundColor DarkYellow
     }
+
+    #=========================================================================
+    Section "带 sidecar 组件：令牌、配置、与 manifest 的一致性"
+
+    $s2b = New-Stage -WithAI -WithSidecar; $stages += $s2b
+    $out = Invoke-Installer $s2b "" @()
+    Assert-Match $out "*sidecar 已安装*" "sidecar 安装成功"
+
+    $cfgPath = Join-Path $SidecarTargetDir "config.json"
+    Assert-True (Test-Path $cfgPath) "sidecar 配置已落盘"
+    Assert-True (Test-Path (Join-Path $SidecarTargetDir "ExcelToolboxSidecar.exe")) "sidecar 程序已复制"
+
+    $cfg = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-True ($cfg.token -match '^[0-9a-f]{64}$') "令牌是 64 个十六进制字符（256 位）"
+    Assert-Equal "https://192.168.1.50:8443" ($cfg.allowedOrigins -join ",") "白名单就是网关地址"
+
+    # 【这是这一节最重要的一条】。manifest 里发给任务窗格的令牌，
+    # 必须和 sidecar 配置里的那个【逐字相同】。两边不一致的表现是
+    # 任务窗格一直 401，而那个现象看起来像"sidecar 没起来"，
+    # 排查方向会完全跑偏。
+    $mx2 = Get-Content -LiteralPath (Join-Path $AITargetDir "manifest.xml") -Raw -Encoding UTF8
+    $tokenInManifest = ""
+    if ($mx2 -match 'sidecar=([0-9a-f]{64})') { $tokenInManifest = $Matches[1] }
+    Assert-Equal $cfg.token $tokenInManifest "manifest 里的令牌与配置里的完全一致"
+    Assert-True ([bool]([xml]$mx2)) "带令牌后 manifest 仍是合法 XML"
+    Assert-True ($mx2 -notmatch '\{\{') "带 sidecar 时占位符也全部替换"
+
+    # 令牌必须每次重新生成。写死或可预测的话，
+    # 任意网页都能拿着它驱动用户的 Excel。
+    $firstToken = $cfg.token
+    $out = Invoke-Installer $s2b "" @()
+    $cfg2 = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-True ($cfg2.token -ne $firstToken) "重装会换一个新令牌（不是写死的）"
+
+    # 重装时 exe 会被覆盖。sidecar 正在跑的话文件是锁住的——
+    # 安装器必须先把它停掉，否则这一步必然失败。
+    Assert-Match $out "*sidecar 已安装*" "重装时能覆盖 exe（先停掉了在跑的进程）"
+
+    $out = Invoke-Installer $s2b "2" @()
+    Assert-Equal $false (Test-Path $SidecarTargetDir) "卸载后 sidecar 目录已删除"
 
     #=========================================================================
     Section "网关地址校验"
