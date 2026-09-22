@@ -91,8 +91,41 @@ foreach ($sec in $sections) {
             $errors += "使用配置条目缺少「标题:」一行：$id（侧边栏目录会显示成 id）"
         }
     }
-    elseif ($sec -notmatch '(?m)^###\s+示例\s*$') {
-        $errors += "缺少示例：$id（在 help.md 的该节里加一段 ### 示例，写处理前→处理后）"
+    else {
+        if ($sec -notmatch '(?m)^###\s+示例\s*$') {
+            $errors += "缺少示例：$id（在 help.md 的该节里加一段 ### 示例，写处理前→处理后）"
+        }
+
+        # 【每条命令都要写处理逻辑】。"怎么用"只说点哪里，
+        # 说不清它到底对数据做了什么——而用户敢不敢点，取决于后者。
+        if ($sec -notmatch '(?m)^###\s+处理逻辑\s*$') {
+            $errors += "缺少处理逻辑：$id（在 help.md 的该节里加一段 ### 处理逻辑，说明它到底怎么处理数据）"
+        }
+    }
+
+    # 【每一条都要有动画演示，配置条目也不例外】。
+    # 少数条目没有的话，用户翻到那几条会以为是页面坏了——
+    # 而"有的有有的没有"这种不一致，没有断言守着就会慢慢扩散。
+    if ($sec -notmatch '(?m)^###\s+动画演示\s*$') {
+        $errors += "缺少动画演示：$id（加一段 ### 动画演示，写「演示: 前 → 后」）"
+    }
+
+    # 动画演示的格式。【写错不会报错，只会安静地退化成普通段落】——
+    # 页面照常打开，只是动画没了，没有任何征兆。
+    if ($sec -match '(?m)^###\s+动画演示\s*$') {
+        $demoLines = @([regex]::Matches($sec, '(?m)^演示[:：]\s*(.+)$') | ForEach-Object { $_.Groups[1].Value })
+        if ($demoLines.Count -eq 0) {
+            $errors += "动画演示一条都没有：$id（### 动画演示 下面要有「演示: 前 → 后」）"
+        }
+        foreach ($d in $demoLines) {
+            if ($d -notmatch '→|->') {
+                $errors += "动画演示缺少箭头：$id 的「$d」（写成「前 → 后」）"
+            }
+        }
+        # 真空格在网页上看不见，等于没演示；约定用 ␣ 这类可见记号
+        if ($sec -match '(?m)^演示[:：]\s*\S.*\s{2,}→') {
+            $errors += "动画演示里用了连续真空格：$id（网页上看不出来，请改用 ␣ 记号）"
+        }
     }
 }
 
@@ -110,7 +143,9 @@ if ($errors.Count -gt 0) {
     $errors | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
     exit 1
 }
-Write-Host "    一一对应，无缺失、无孤儿、无重复；$($cmdHelpIds.Count) 条命令都有示例" -ForegroundColor Green
+$demoCount = @([regex]::Matches($helpText, '(?m)^###\s+动画演示\s*$')).Count
+Write-Host "    一一对应，无缺失、无孤儿、无重复；$($cmdHelpIds.Count) 条命令都有示例和处理逻辑" -ForegroundColor Green
+Write-Host "    动画演示 $demoCount 段，格式都合法" -ForegroundColor Green
 
 #-----------------------------------------------------------------------------
 # 再做运行时检查：帮助内容真的进了 .xlam
@@ -199,6 +234,73 @@ try {
 
     $renderGuide = $xl.Run("'$OutputName'!Toolbox_HelpRender", "guide.macroTrust")
     if ($renderGuide -notmatch '宏被禁用') { $bad += "使用配置正文渲染不出标题：guide.macroTrust" }
+
+    #-------------------------------------------------------------------------
+    # 帮助网页
+    #
+    # 【这一页原先一条断言都没有】。目录漏掉一整组、动画块没渲染出来、
+    # 正文顺序和目录对不上——全都不会让任何测试变红，而用户一打开就看见。
+    # 下面这些都是"打开就能看出不对，但自动化一直看不见"的东西。
+    #-------------------------------------------------------------------------
+    $pagePath = $xl.Run("'$OutputName'!Toolbox_HelpHtml")
+    if (-not $pagePath -or -not (Test-Path -LiteralPath $pagePath)) {
+        $bad += "帮助网页没生成出来"
+    } else {
+        $page = [IO.File]::ReadAllText($pagePath, [Text.UTF8Encoding]::new($false))
+
+        if ($page -notmatch '<aside id="toc"') { $bad += "帮助网页里没有目录" }
+
+        # 每个分组的标题都要在目录里出现。少一整组是最容易发生、
+        # 也最容易没人发现的——比如 guide.* 不在命令注册表里，
+        # 只取命令的话整个「使用前必读」会凭空消失。
+        $groups = @(($xl.Run("'$OutputName'!Toolbox_HelpGroups") -split "`n") | Where-Object { $_ })
+        foreach ($g in $groups) {
+            $gname = ($g -split '\|')[1]
+            if ($page -notmatch [regex]::Escape($gname)) {
+                $bad += "帮助网页的目录里缺分组：$gname"
+            }
+        }
+
+        # 每个条目都要有正文锚点，否则目录点过去是空的
+        $missingAnchor = @()
+        foreach ($id in $cmdHelpIds) {
+            if ($page -notmatch ('id="' + [regex]::Escape($id) + '"')) { $missingAnchor += $id }
+        }
+        foreach ($g in @(($xl.Run("'$OutputName'!Toolbox_HelpItems", "guide") -split "`n") | Where-Object { $_ })) {
+            $gid = ($g -split '\|')[0]
+            if ($page -notmatch ('id="' + [regex]::Escape($gid) + '"')) { $missingAnchor += $gid }
+        }
+        if ($missingAnchor.Count -gt 0) {
+            $bad += "帮助网页里没有这些条目的正文：" + (($missingAnchor | Select-Object -First 5) -join ', ')
+        }
+
+        # 动画：help.md 里有多少段，网页上就该有多少个播放器。
+        # 【解析写错时它会安静地退化成普通段落】，数量对不上是唯一的信号。
+        $mdDemos = @([regex]::Matches(
+            [IO.File]::ReadAllText($HelpMd, [Text.UTF8Encoding]::new($false)),
+            '(?m)^###\s+动画演示\s*$')).Count
+        $pageDemos = @([regex]::Matches($page, 'class="demo"')).Count
+        if ($pageDemos -ne $mdDemos) {
+            $bad += "帮助网页里的动画块有 $pageDemos 个，help.md 里写了 $mdDemos 段（解析可能退化成了普通段落）"
+        } elseif ($pageDemos -eq 0) {
+            $bad += "帮助网页里一个动画块都没有"
+        } else {
+            Write-Host "    帮助网页：目录 $($groups.Count) 组、动画 $pageDemos 段" -ForegroundColor Green
+        }
+
+        # 动画的两个状态都必须真的写进了属性里
+        if ($page -notmatch 'data-a="' -or $page -notmatch 'data-b="') {
+            $bad += "动画块缺少处理前/处理后的数据"
+        }
+
+        # 【目录顺序必须和正文顺序一致】。两边各排各的，用户点过去
+        # 会发现上下文对不上，而这种错不会让任何别的断言变红。
+        $tocOrder = @([regex]::Matches($page, 'href="#([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+        $bodyOrder = @([regex]::Matches($page, '<section id="([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+        if (($tocOrder -join ',') -ne ($bodyOrder -join ',')) {
+            $bad += "帮助网页的目录顺序和正文顺序不一致"
+        }
+    }
 
     #-------------------------------------------------------------------------
     # 环境体检：【只报告，不代改】

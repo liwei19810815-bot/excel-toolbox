@@ -1,4 +1,4 @@
-Attribute VB_Name = "modHelp"
+﻿Attribute VB_Name = "modHelp"
 '==============================================================================
 ' modHelp - 帮助系统
 '
@@ -254,12 +254,27 @@ End Function
 ' HTML 生成
 '==============================================================================
 
-Private Function BuildHtml(ByVal focusId As String) As String
-    Dim ids() As String
-    ids = Split(modAction.AllActionIds(), vbLf)
+' 生成完整帮助网页并返回路径。给 modPublic 的测试入口用。
+Public Function BuildHelpPage() As String
+    BuildHelpPage = BuildHtml(vbNullString)
+End Function
 
+Private Function BuildHtml(ByVal focusId As String) As String
     Dim all As New Collection
     Dim i As Long
+
+    ' 【guide.* 必须一起放进来】。它们不是命令，AllActionIds 里没有，
+    ' 只取命令的话整个「使用前必读」分组会从网页上消失——
+    ' 而那恰恰是用户打不开、宏被禁用时最需要看的一组。
+    Dim gitems As Variant, oneId As String
+    gitems = Split(CatalogItems("guide"), vbLf)
+    For i = LBound(gitems) To UBound(gitems)
+        oneId = SplitField(CStr(gitems(i)), 1)
+        If Len(oneId) > 0 Then all.Add oneId
+    Next i
+
+    Dim ids() As String
+    ids = Split(modAction.AllActionIds(), vbLf)
     For i = LBound(ids) To UBound(ids)
         If Len(ids(i)) > 0 Then all.Add ids(i)
     Next i
@@ -272,15 +287,50 @@ Private Function BuildHtmlForSet(ByVal ids As Collection, ByVal note As String) 
     If ids Is Nothing Then Exit Function
     If ids.Count = 0 Then Exit Function
 
-    Dim sb As String
-    sb = HtmlHead(note)
-
-    Dim i As Long, id As String
+    ' 把这一批 id 做成一个便于判断"在不在集合里"的查找串。
+    ' 搜索结果页只列命中的那些，目录也要跟着只显示命中的。
+    Dim lookup As String, i As Long
     For i = 1 To ids.Count
-        id = CStr(ids(i))
-        sb = sb & HtmlEntry(id)
+        lookup = lookup & "|" & CStr(ids(i)) & "|"
     Next i
 
+    Dim sb As String
+    sb = HtmlHead(note)
+    sb = sb & "<div id=""layout"">" & vbCrLf
+    sb = sb & HtmlToc(lookup)
+    sb = sb & "<main id=""content"">" & vbCrLf
+
+    ' 【正文顺序必须和目录一致】。两边各按各的顺序排，用户点目录跳过去
+    ' 会发现上下文对不上——而这种错不会让任何测试变红。
+    ' 所以这里同样按分组遍历，不按传入集合的原始顺序。
+    Dim groups As Variant, gi As Long, gid As String, gname As String
+    Dim items As Variant, ii As Long, oneId As String
+    groups = Split(CatalogGroups(), vbLf)
+
+    For gi = LBound(groups) To UBound(groups)
+        gid = SplitField(CStr(groups(gi)), 1)
+        gname = SplitField(CStr(groups(gi)), 2)
+        If Len(gid) > 0 Then
+            items = Split(CatalogItems(gid), vbLf)
+            Dim wroteHeader As Boolean
+            wroteHeader = False
+            For ii = LBound(items) To UBound(items)
+                oneId = SplitField(CStr(items(ii)), 1)
+                If Len(oneId) > 0 Then
+                    If InStr(lookup, "|" & oneId & "|") > 0 Then
+                        If Not wroteHeader Then
+                            sb = sb & "<h2 class=""grp"" id=""grp-" & Esc(gid) & """>" & _
+                                 Esc(gname) & "</h2>" & vbCrLf
+                            wroteHeader = True
+                        End If
+                        sb = sb & HtmlEntry(oneId)
+                    End If
+                End If
+            Next ii
+        End If
+    Next gi
+
+    sb = sb & "</main></div>" & vbCrLf
     sb = sb & HtmlTail()
 
     Dim path As String
@@ -293,15 +343,76 @@ Failed:
     Err.Clear
 End Function
 
+' 取 "a|b" 里的第 n 段（1 起）。目录数据都是这个形状。
+Private Function SplitField(ByVal line As String, ByVal n As Long) As String
+    Dim parts() As String
+    parts = Split(line, "|")
+    If n - 1 > UBound(parts) Then Exit Function
+    SplitField = Trim$(parts(n - 1))
+End Function
+
+'------------------------------------------------------------------------------
+' 左侧目录。
+'
+' 【目录和正文共用 CatalogGroups / CatalogItems】，不另起一套顺序。
+' 侧边栏、网页目录、正文顺序三处若各排各的，改了一处另外两处照旧，
+' 而且不会有任何测试变红。
+'------------------------------------------------------------------------------
+Private Function HtmlToc(ByVal lookup As String) As String
+    Dim s As String
+    Dim groups As Variant, gi As Long, gid As String, gname As String
+    Dim items As Variant, ii As Long, oneId As String, oneLabel As String
+
+    s = "<aside id=""toc"">" & vbCrLf
+    s = s & "<div class=""toc-head"">目录</div>" & vbCrLf
+    s = s & "<input id=""filter"" type=""search"" placeholder=""按名称筛选…"" autocomplete=""off"">" & vbCrLf
+    s = s & "<nav>" & vbCrLf
+
+    groups = Split(CatalogGroups(), vbLf)
+    For gi = LBound(groups) To UBound(groups)
+        gid = SplitField(CStr(groups(gi)), 1)
+        gname = SplitField(CStr(groups(gi)), 2)
+        If Len(gid) > 0 Then
+            items = Split(CatalogItems(gid), vbLf)
+
+            Dim block As String, n As Long
+            block = ""
+            n = 0
+            For ii = LBound(items) To UBound(items)
+                oneId = SplitField(CStr(items(ii)), 1)
+                oneLabel = SplitField(CStr(items(ii)), 2)
+                If Len(oneId) > 0 Then
+                    If InStr(lookup, "|" & oneId & "|") > 0 Then
+                        block = block & "<a href=""#" & Esc(oneId) & """>" & _
+                                Esc(oneLabel) & "</a>" & vbCrLf
+                        n = n + 1
+                    End If
+                End If
+            Next ii
+
+            ' 空分组不显示——搜索结果页里大多数分组都是空的
+            If n > 0 Then
+                s = s & "<div class=""toc-grp"">" & Esc(gname) & "</div>" & vbCrLf & block
+            End If
+        End If
+    Next gi
+
+    s = s & "</nav></aside>" & vbCrLf
+    HtmlToc = s
+End Function
+
 Private Function HtmlEntry(ByVal id As String) As String
     Dim label As String, tip As String, body As String
     label = modAction.ActionLabel(id)
     tip = modAction.ActionScreentip(id)
     body = BodyOf(id)
 
+    ' guide.* 不是命令，注册表里没有它们，标题要从帮助表取
+    If Len(label) = 0 Then label = TitleOf(id)
+
     Dim s As String
     s = "<section id=""" & Esc(id) & """>" & vbCrLf
-    s = s & "<h2>" & Esc(label) & " <code>" & Esc(id) & "</code></h2>" & vbCrLf
+    s = s & "<h3 class=""cmd"">" & Esc(label) & " <code>" & Esc(id) & "</code></h3>" & vbCrLf
 
     ' 可撤销标注直接取注册表生成的那句，和按钮提示完全一致
     If Len(tip) > 0 Then
@@ -319,28 +430,132 @@ Private Function HtmlEntry(ByVal id As String) As String
 End Function
 
 '------------------------------------------------------------------------------
-' 极简 Markdown 转换：只认 ### 小标题、**粗体**、段落。
+' 极简 Markdown 转换：只认 #### 小标题、**粗体**、段落，外加「动画」块。
 '
 ' 【不引入完整 Markdown 解析】：帮助正文的格式是我们自己定的，
-' 只用到这三种。为三种语法写一个解析器，比为了通用性引入一堆代码划算得多。
+' 只用到这几种。为它们写一个小解析器，比为通用性引入一堆代码划算。
+'
+' 动画块的写法（help.md 里）：
+'
+'     ### 动画演示
+'     演示: 处理前的内容 → 处理后的内容
+'     演示: 另一行 → 另一行结果
+'
+' 每条「演示:」是一行单元格，网页上会在前后两个状态之间来回切换。
+' 【故意不用 GIF 之类的二进制资源】：那种东西 git 看不出差别、评审
+' 无从审起，改一个字都要重新录制。这里的动画是纯数据 + CSS/JS 渲染的，
+' 源码可 diff，改一个字就是改一个字。
 '------------------------------------------------------------------------------
 Private Function MarkdownLite(ByVal src As String) As String
     Dim lines() As String, i As Long, line As String, s As String
+    Dim inDemo As Boolean, demoRows As String, demoCount As Long
 
     lines = Split(Replace(src, vbCrLf, vbLf), vbLf)
     For i = LBound(lines) To UBound(lines)
         line = Trim$(lines(i))
+
+        ' 动画块在遇到下一个小标题或正文结束时收口
+        If inDemo Then
+            ' 【"演示" 是两个字符】。这里原先写的是 Left$(line, 3)，
+            ' 拿 3 个字符去比一个 2 字的词，永远不相等——于是动画块
+            ' 一条都识别不出来，整块退化成普通段落。页面照常打开、
+            ' 不报任何错，只是动画没了：典型的"不报错但坏了"。
+            If Left$(line, 3) = "###" Or (Len(line) > 0 And Left$(line, 2) <> "演示") Then
+                s = s & CloseDemo(demoRows, demoCount)
+                inDemo = False
+                demoRows = ""
+                demoCount = 0
+            ElseIf Left$(line, 2) = "演示" Then
+                Dim payload As String, colonPos As Long
+                colonPos = InStr(line, ":")
+                If colonPos = 0 Then colonPos = InStr(line, "：")
+                If colonPos > 0 Then
+                    payload = Trim$(Mid$(line, colonPos + 1))
+                    demoRows = demoRows & DemoRow(payload)
+                    demoCount = demoCount + 1
+                End If
+                GoTo NextLine
+            Else
+                GoTo NextLine
+            End If
+        End If
+
         If Len(line) = 0 Then GoTo NextLine
 
         If Left$(line, 4) = "### " Then
-            s = s & "<h3>" & Esc(Mid$(line, 5)) & "</h3>" & vbCrLf
+            Dim heading As String
+            heading = Mid$(line, 5)
+            If InStr(heading, "动画") > 0 Then
+                s = s & "<h4>" & Esc(heading) & "</h4>" & vbCrLf
+                inDemo = True
+                demoRows = ""
+                demoCount = 0
+            Else
+                s = s & "<h4>" & Esc(heading) & "</h4>" & vbCrLf
+            End If
         Else
-            s = s & "<p>" & Bold(Esc(line)) & "</p>" & vbCrLf
+            s = s & "<p>" & Code(Bold(Esc(line))) & "</p>" & vbCrLf
         End If
 NextLine:
     Next i
 
+    If inDemo Then s = s & CloseDemo(demoRows, demoCount)
+
     MarkdownLite = s
+End Function
+
+' 一行演示："前 → 后"。箭头两种写法都认。
+Private Function DemoRow(ByVal payload As String) As String
+    Dim arrowPos As Long, before As String, after As String
+    arrowPos = InStr(payload, "→")
+    If arrowPos > 0 Then
+        before = Trim$(Left$(payload, arrowPos - 1))
+        after = Trim$(Mid$(payload, arrowPos + 1))
+    Else
+        arrowPos = InStr(payload, "->")
+        If arrowPos > 0 Then
+            before = Trim$(Left$(payload, arrowPos - 1))
+            after = Trim$(Mid$(payload, arrowPos + 2))
+        Else
+            ' 【没有箭头就整行当成"前后一样"】，不要丢掉它。
+            ' 悄悄吞掉一行的话，写错格式的人完全看不出哪里不对。
+            before = payload
+            after = payload
+        End If
+    End If
+
+    DemoRow = "<div class=""dcell"" data-a=""" & Esc(before) & """ data-b=""" & Esc(after) & """></div>" & vbCrLf
+End Function
+
+Private Function CloseDemo(ByVal rows As String, ByVal n As Long) As String
+    If n = 0 Then Exit Function
+    Dim s As String
+    s = "<div class=""demo"">" & vbCrLf
+    s = s & "<div class=""dbar""><b class=""dlabel"">处理前</b>" & _
+        "<button class=""dtoggle"" type=""button"">暂停</button>" & _
+        "<button class=""dstep"" type=""button"">单步</button></div>" & vbCrLf
+    s = s & "<div class=""dcells"">" & vbCrLf & rows & "</div>" & vbCrLf
+    s = s & "</div>" & vbCrLf
+    CloseDemo = s
+End Function
+
+' `行内代码` → <code>。和 Bold 一样成对才转，落单的反引号原样保留。
+' 【要在 Esc 之后再做】：先转的话生成的标签会被 Esc 成字面量。
+Private Function Code(ByVal src As String) As String
+    Dim parts() As String, i As Long, s As String
+    parts = Split(src, "`")
+
+    For i = LBound(parts) To UBound(parts)
+        If i Mod 2 = 1 And i < UBound(parts) Then
+            s = s & "<code>" & parts(i) & "</code>"
+        ElseIf i Mod 2 = 1 Then
+            s = s & "`" & parts(i)
+        Else
+            s = s & parts(i)
+        End If
+    Next i
+
+    Code = s
 End Function
 
 ' **粗体** → <strong>。成对出现才转，落单的星号原样保留。
@@ -364,34 +579,107 @@ End Function
 Private Function HtmlHead(ByVal note As String) As String
     Dim s As String
     s = "<!doctype html><html lang=""zh-CN""><head><meta charset=""utf-8"">" & vbCrLf
+    s = s & "<meta name=""viewport"" content=""width=device-width,initial-scale=1"">" & vbCrLf
     s = s & "<title>" & Esc(APP_NAME) & " 帮助</title>" & vbCrLf
     s = s & "<style>" & vbCrLf
-    s = s & "body{font-family:""Microsoft YaHei"",sans-serif;max-width:820px;margin:0 auto;padding:24px;line-height:1.75;color:#222}" & vbCrLf
-    s = s & "h1{font-size:22px;border-bottom:2px solid #217346;padding-bottom:8px}" & vbCrLf
-    s = s & "h2{font-size:17px;margin-top:32px;color:#217346}" & vbCrLf
-    s = s & "h2 code{font-size:12px;color:#888;font-weight:normal}" & vbCrLf
-    s = s & "h3{font-size:14px;margin:14px 0 4px;color:#555}" & vbCrLf
-    s = s & "p{margin:4px 0}" & vbCrLf
-    s = s & ".tip{background:#f3f7f4;border-left:3px solid #217346;padding:8px 12px;color:#444;font-size:13px}" & vbCrLf
+    s = s & "*{box-sizing:border-box}" & vbCrLf
+    ' 【锚点跳转必须避开粘性头部】。头部是 position:sticky 盖在最上面，
+    ' 不留出这段距离的话，点目录跳过去，要看的那个标题正好被压在头部下面——
+    ' 用户看到的是"跳错了地方"。scroll-margin-top 专门解决这件事。
+    s = s & "html{scroll-behavior:smooth}" & vbCrLf
+    s = s & "section,h2.grp{scroll-margin-top:76px}" & vbCrLf
+    s = s & "body{font-family:""Microsoft YaHei"",sans-serif;margin:0;line-height:1.75;color:#222;background:#fff}" & vbCrLf
+    s = s & "header{position:sticky;top:0;z-index:5;background:#217346;color:#fff;padding:12px 20px}" & vbCrLf
+    s = s & "header h1{font-size:17px;margin:0}" & vbCrLf
+    s = s & "header .sub{font-size:12px;opacity:.85}" & vbCrLf
+    s = s & "#layout{display:flex;align-items:flex-start;max-width:1180px;margin:0 auto}" & vbCrLf
+    s = s & "#toc{width:250px;flex:0 0 250px;position:sticky;top:56px;max-height:calc(100vh - 56px);" & _
+            "overflow:auto;padding:14px 10px 30px;border-right:1px solid #e6e6e6;font-size:13px}" & vbCrLf
+    s = s & ".toc-head{font-weight:700;color:#217346;margin-bottom:6px}" & vbCrLf
+    s = s & "#filter{width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:4px;margin-bottom:10px;font-size:13px}" & vbCrLf
+    s = s & ".toc-grp{margin:12px 0 4px;font-weight:700;color:#555;font-size:12px}" & vbCrLf
+    s = s & "#toc a{color:#2a6;text-decoration:none;display:block;padding:3px 6px;border-radius:3px;color:#33691e}" & vbCrLf
+    s = s & "#toc a:hover{background:#eef6ef}" & vbCrLf
+    s = s & "#toc a.on{background:#217346;color:#fff}" & vbCrLf
+    s = s & "#content{flex:1;min-width:0;padding:18px 26px 80px}" & vbCrLf
+    s = s & "h2.grp{font-size:18px;color:#217346;border-bottom:2px solid #217346;padding-bottom:6px;margin:34px 0 10px}" & vbCrLf
+    s = s & "h3.cmd{font-size:15px;margin:22px 0 6px;color:#1b5e20}" & vbCrLf
+    s = s & "h3.cmd code{font-size:11px;color:#999;font-weight:400}" & vbCrLf
+    s = s & "h4{font-size:13px;margin:12px 0 2px;color:#666}" & vbCrLf
+    s = s & "p{margin:3px 0}" & vbCrLf
+    s = s & "code{background:#f4f4f4;padding:1px 4px;border-radius:3px}" & vbCrLf
+    s = s & ".tip{background:#f3f7f4;border-left:3px solid #217346;padding:6px 10px;color:#444;font-size:12px}" & vbCrLf
     s = s & ".missing{color:#c00}" & vbCrLf
-    s = s & ".note{background:#fff8e1;border:1px solid #ffe082;padding:10px 14px;border-radius:4px}" & vbCrLf
-    s = s & "section{border-bottom:1px solid #eee;padding-bottom:12px}" & vbCrLf
-    s = s & "#toc{columns:3;font-size:13px;margin:16px 0 28px}" & vbCrLf
-    s = s & "#toc a{color:#217346;text-decoration:none;display:block;padding:2px 0}" & vbCrLf
+    s = s & ".note{background:#fff8e1;border:1px solid #ffe082;padding:10px 14px;border-radius:4px;margin:14px 0}" & vbCrLf
+    s = s & "section{border-bottom:1px solid #f0f0f0;padding-bottom:14px}" & vbCrLf
+    s = s & ".demo{border:1px solid #d8e6da;border-radius:6px;margin:8px 0 10px;overflow:hidden}" & vbCrLf
+    s = s & ".dbar{display:flex;align-items:center;gap:8px;background:#f3f7f4;padding:5px 10px;font-size:12px}" & vbCrLf
+    s = s & ".dlabel{color:#217346;min-width:52px}" & vbCrLf
+    s = s & ".dbar button{font:inherit;font-size:11px;border:1px solid #bcd;background:#fff;" & _
+            "border-radius:3px;padding:1px 8px;cursor:pointer}" & vbCrLf
+    s = s & ".dcells{padding:8px 10px;display:flex;flex-direction:column;gap:5px}" & vbCrLf
+    s = s & ".dcell{font-family:Consolas,""Courier New"",monospace;font-size:13px;background:#fff;" & _
+            "border:1px solid #ddd;border-radius:3px;padding:4px 8px;white-space:pre;" & _
+            "transition:background .25s,color .25s}" & vbCrLf
+    s = s & ".dcell.changed{background:#fff6d8}" & vbCrLf
+    s = s & "@media(max-width:820px){#layout{display:block}#toc{width:auto;position:static;max-height:none;border-right:0}}" & vbCrLf
     s = s & "</style></head><body>" & vbCrLf
-    s = s & "<h1>" & Esc(APP_NAME) & " 使用帮助</h1>" & vbCrLf
+
+    s = s & "<header><h1>" & Esc(APP_NAME) & " 使用帮助</h1>" & vbCrLf
+    s = s & "<div class=""sub"">v" & APP_VERSION & "　左侧是目录，点一下跳到对应功能</div></header>" & vbCrLf
 
     If Len(note) > 0 Then
-        s = s & "<p class=""note"">与「" & Esc(note) & "」相关的功能：</p>" & vbCrLf
+        s = s & "<p class=""note"" style=""margin:14px 26px"">与「" & Esc(note) & "」相关的功能：</p>" & vbCrLf
     End If
 
     HtmlHead = s
 End Function
 
 Private Function HtmlTail() As String
-    HtmlTail = "<p style=""margin-top:40px;color:#888;font-size:12px"">" & _
-               Esc(APP_NAME) & " v" & APP_VERSION & "　本页由加载宏即时生成。</p>" & _
-               "</body></html>"
+    Dim s As String
+    s = "<p style=""margin:40px 26px 20px;color:#888;font-size:12px"">" & _
+        Esc(APP_NAME) & " v" & APP_VERSION & "　本页由加载宏即时生成。</p>" & vbCrLf
+
+    s = s & "<script>" & vbCrLf
+    ' 目录筛选：按名字过滤，空分组一起隐藏
+    s = s & "var f=document.getElementById('filter');" & vbCrLf
+    s = s & "if(f){f.addEventListener('input',function(){" & vbCrLf
+    s = s & " var q=f.value.trim().toLowerCase();" & vbCrLf
+    s = s & " var nav=document.querySelector('#toc nav');" & vbCrLf
+    s = s & " var kids=nav.children,lastGrp=null,shown=0;" & vbCrLf
+    s = s & " for(var i=0;i<kids.length;i++){var el=kids[i];" & vbCrLf
+    s = s & "  if(el.className==='toc-grp'){if(lastGrp)lastGrp.style.display=shown?'':'none';lastGrp=el;shown=0;el.style.display='';}" & vbCrLf
+    s = s & "  else{var hit=!q||el.textContent.toLowerCase().indexOf(q)>=0;el.style.display=hit?'':'none';if(hit)shown++;}}" & vbCrLf
+    s = s & " if(lastGrp)lastGrp.style.display=shown?'':'none';});}" & vbCrLf
+
+    ' 滚动时高亮当前所在条目
+    s = s & "var secs=[].slice.call(document.querySelectorAll('#content section'));" & vbCrLf
+    s = s & "var links={};[].forEach.call(document.querySelectorAll('#toc a'),function(a){links[a.getAttribute('href').slice(1)]=a;});" & vbCrLf
+    s = s & "function mark(){var y=window.scrollY+90,cur=null;" & vbCrLf
+    s = s & " for(var i=0;i<secs.length;i++){if(secs[i].offsetTop<=y)cur=secs[i];}" & vbCrLf
+    s = s & " for(var k in links)links[k].classList.remove('on');" & vbCrLf
+    s = s & " if(cur&&links[cur.id])links[cur.id].classList.add('on');}" & vbCrLf
+    s = s & "window.addEventListener('scroll',mark);mark();" & vbCrLf
+
+    ' 动画：在「处理前 / 处理后」之间来回切
+    s = s & "[].forEach.call(document.querySelectorAll('.demo'),function(d){" & vbCrLf
+    s = s & " var cells=[].slice.call(d.querySelectorAll('.dcell'));" & vbCrLf
+    s = s & " var lab=d.querySelector('.dlabel'),btn=d.querySelector('.dtoggle'),step=d.querySelector('.dstep');" & vbCrLf
+    s = s & " var state=0,timer=null;" & vbCrLf
+    s = s & " function draw(){cells.forEach(function(c){" & vbCrLf
+    s = s & "  var a=c.getAttribute('data-a'),b=c.getAttribute('data-b');" & vbCrLf
+    s = s & "  c.textContent=state?b:a;" & vbCrLf
+    s = s & "  if(state&&a!==b)c.classList.add('changed');else c.classList.remove('changed');});" & vbCrLf
+    s = s & "  lab.textContent=state?'处理后':'处理前';}" & vbCrLf
+    s = s & " function flip(){state=state?0:1;draw();}" & vbCrLf
+    s = s & " function play(){timer=setInterval(flip,1800);btn.textContent='暂停';}" & vbCrLf
+    s = s & " function pause(){clearInterval(timer);timer=null;btn.textContent='播放';}" & vbCrLf
+    s = s & " btn.addEventListener('click',function(){timer?pause():play();});" & vbCrLf
+    s = s & " step.addEventListener('click',function(){if(timer)pause();flip();});" & vbCrLf
+    s = s & " draw();play();});" & vbCrLf
+    s = s & "</script>" & vbCrLf
+    s = s & "</body></html>"
+    HtmlTail = s
 End Function
 
 ' 【& 必须第一个换】，否则后面换出来的 &lt; 会被再换成 &amp;lt;。

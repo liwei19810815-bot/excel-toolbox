@@ -1,4 +1,4 @@
-Attribute VB_Name = "modPublic"
+﻿Attribute VB_Name = "modPublic"
 '==============================================================================
 ' modPublic - 对外暴露的入口
 '
@@ -102,6 +102,15 @@ End Function
 
 Public Function Toolbox_HelpGroupOf(ByVal actionId As String) As String
     Toolbox_HelpGroupOf = modHelp.GroupOfAction(actionId)
+End Function
+
+' 生成完整帮助网页，返回文件路径。
+'
+' 【给测试用】。那个网页原先没有任何断言守着——目录漏掉一整组、
+' 动画块没渲染出来、正文顺序和目录对不上，都不会让任何测试变红，
+' 而用户一打开就看见。
+Public Function Toolbox_HelpHtml() As String
+    Toolbox_HelpHtml = modHelp.BuildHelpPage()
 End Function
 
 Public Function Toolbox_EnvReport() As String
