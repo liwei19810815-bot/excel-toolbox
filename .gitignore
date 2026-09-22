@@ -1,5 +1,7 @@
 dist/
 tests/output/
+# 探针加载宏是生成物，用 tools\check-office-child-process.ps1 -MakeProbe 现做
+tools/AsrProbe.xlam
 ~$*
 *.tmp
 .vs/
