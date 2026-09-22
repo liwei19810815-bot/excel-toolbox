@@ -138,6 +138,31 @@ Office.js 要求任务窗格的 `SourceLocation` 必须是 **https**（`localhos
 网关抖一下就让全公司用不了 AI、让新员工装不上，代价比"多开了一会儿"
 大得多。要强管控就用 `0`，它在安装侧是硬卡死的。
 
+## AI 按钮能不能并进「工具箱」选项卡？——**不能，已查证**
+
+结论：**做不到**，而且是结构性的，不是配置问题。别再花时间试了。
+
+| 依据 | 说明 |
+|---|---|
+| `<CustomTab>` **只有 `id` 一个属性** | 没有 `idQ`、没有命名空间限定。而 COM 加载项之间能合并选项卡，靠的正是 `idQ` + 共享命名空间 |
+| 文档原文：id *"must be unique within the manifest"* | 是 **manifest 内**唯一，不是跨加载项共享的标识 |
+| `InsertAfter` / `InsertBefore` 只接受**内置**选项卡 id | 而且**仅 PowerPoint 可用**。Excel 里连"让两个选项卡挨着"都控制不了 |
+| *"Add-ins are limited to one custom tab"* | 每个 Web 加载项最多一个自定义选项卡 |
+
+出处：[CustomTab element](https://learn.microsoft.com/en-us/javascript/api/manifest/customtab)
+
+**反方向也不通**：VBA 那侧加个按钮去打开 Office.js 任务窗格同样没有受支持的 API
+（`Office.addin.showAsTaskpane()` 是 JS 侧的，VBA 调不到）。
+
+### 实际可选的两种摆法
+
+| 做法 | 效果 | 代价 |
+|---|---|---|
+| **挂在「开始」选项卡**（当前做法） | 按钮在用户本来就待着的地方 | 和工具箱不在一处 |
+| 自己一个选项卡（如「工具箱 AI」） | 名字上像一家人 | 位置不可控，可能离「工具箱」很远；两个名字相近的选项卡反而更绕 |
+
+当前选的是第一种。
+
 ### 参考实现在哪
 
 协议这一侧已经落地，代码在 `Excel AI` 项目里：
