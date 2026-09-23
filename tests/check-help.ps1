@@ -285,18 +285,43 @@ try {
         # guide.* 不是注册命令，ActionLabel 对查不到的 id 会把 id 原样
         # 返回当兜底——这个返回值本身不是空字符串，用"是不是空"去判断
         # "要不要换成 help.md 里的标题"就会一直判成"已经有标题"，
-        # 实际显示出来的却是英文 actionId。这里直接断言正文标题命中
-        # help.md 写的中文，而不是退化成 id。
-        if ($page -match '(?s)<h3 class="cmd">(.*?)<code>guide\.macroTrust</code>') {
-            $guideTitle = $Matches[1]
-            if ($guideTitle -match '^\s*guide\.macroTrust\s*$') {
-                $bad += "帮助网页里 guide.macroTrust 的标题显示成了 id 本身，不是中文标题"
+        # 实际显示出来的却是英文 actionId。
+        #
+        # 【七条 guide.* 全部要查，不能只查一条】。之前只断言了
+        # guide.macroTrust 一个——如果哪天把判断逻辑改坏了但恰好保留了
+        # 这一条的某个特例，其余六条照样会静默显示成 id，这条断言看不见。
+        # 标题从 help.md 里当场解析，不是在测试脚本里另写一份——写两份
+        # 迟早会漂移，那时候到底是谁错了都说不清。
+        foreach ($gid in $guideIds) {
+            $titleMatch = [regex]::Match($helpText,
+                '(?m)^##\s+' + [regex]::Escape($gid) + '\s*$[\s\S]*?^标题[:：]\s*(.+)$')
+            if (-not $titleMatch.Success) {
+                $bad += "help.md 里 $gid 没有「标题:」一行，测不了网页标题"
+                continue
             }
-            if ($guideTitle -notmatch '宏被禁用') {
-                $bad += "帮助网页里 guide.macroTrust 的标题不是 help.md 里写的中文（现在是「$($guideTitle.Trim())」）"
+            $expectedTitle = $titleMatch.Groups[1].Value.Trim()
+
+            # 【必须先锚定到这个 id 专属的 <section>，不能直接从整页里找
+            # "<h3 ...><code>gid</code>"】。.*? 是懒惰匹配没错，但它不认
+            # "属于哪个 section"，.NET 正则会从整页第一个 <h3> 开始往后
+            # 扩张，直到碰到目标 gid 的 <code> 标签——如果目标不是页面
+            # 第一条，捕获到的会是别的条目那个更靠前的 <h3>，标题全部
+            # 张冠李戴。<section id="gid"> 在整页唯一，先锚住这个再往
+            # 里找，范围就不会跑到别的条目身上。
+            $htmlMatch = [regex]::Match($page,
+                '(?s)<section id="' + [regex]::Escape($gid) + '">.*?<h3 class="cmd">(.*?)<code>' + [regex]::Escape($gid) + '</code>')
+            if (-not $htmlMatch.Success) {
+                $bad += "帮助网页里找不到 $gid 的标题结构"
+                continue
             }
-        } else {
-            $bad += "帮助网页里找不到 guide.macroTrust 的标题结构"
+            $shownTitle = $htmlMatch.Groups[1].Value.Trim()
+
+            if ($shownTitle -eq $gid) {
+                $bad += "帮助网页里 $gid 的标题显示成了 id 本身，不是中文标题"
+            }
+            elseif ($shownTitle -ne $expectedTitle) {
+                $bad += "帮助网页里 $gid 的标题和 help.md 里写的不一致（help.md「$expectedTitle」，网页「$shownTitle」）"
+            }
         }
 
         # 每个分组的标题都要在目录里出现。少一整组是最容易发生、
