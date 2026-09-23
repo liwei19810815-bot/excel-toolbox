@@ -611,20 +611,12 @@ Private Function CloseDemo(ByVal rows As String, ByVal n As Long, _
         "<button class=""dstep"" type=""button"">单步</button></div>" & vbCrLf
 
     If gridRows > 0 Then
-        ' 【用了合并记号的网格不做增删判定】。合并不是删除：
-        ' 三行的"大区"并成一格之后，那两行还在，只是共用一个格子。
-        ' 把它们标成"已删除"是在骗人——而动画本身（一格纵跨三行）
-        ' 已经把这件事演清楚了，不需要再加标注。
-        Dim mergeFlag As String
-        mergeFlag = ""
-        If InStr(gridA, "gmergeup") > 0 Or InStr(gridB, "gmergeup") > 0 _
-           Or InStr(gridA, "colspan") > 0 Or InStr(gridB, "colspan") > 0 Then
-            mergeFlag = " data-merge=""1"""
-        End If
         ' 两个状态各出一张表，切换时整表替换。
         ' 【变化在哪由 JS 逐格比出来】，不在这里硬编码——
         ' 写死的话，改了演示数据却忘了改高亮，就会指着没变的格子说"这里变了"。
-        s = s & "<div class=""dstage""" & mergeFlag & ">" & vbCrLf
+        ' 合并（^）产生的延续行首格是空的，JS 那边空键不参与增删配对，
+        ' 不需要在这里额外标注"这是合并演示，跳过判定"。
+        s = s & "<div class=""dstage"">" & vbCrLf
         s = s & "<table class=""dgrid gA"">" & vbCrLf & gridA & "</table>" & vbCrLf
         s = s & "<table class=""dgrid gB"">" & vbCrLf & gridB & "</table>" & vbCrLf
         s = s & "</div>" & vbCrLf
@@ -789,30 +781,45 @@ Private Function HtmlTail() As String
     s = s & " var d=st.closest('.demo');" & vbCrLf
     s = s & " var A=st.querySelector('.gA'),B=st.querySelector('.gB');" & vbCrLf
     s = s & " var lab=d.querySelector('.dlabel'),btn=d.querySelector('.dtoggle'),step=d.querySelector('.dstep');" & vbCrLf
-    s = s & " function rowKey(tr){return [].map.call(tr.cells,function(c){return c.textContent;}).join('\u0001');}" & vbCrLf
-    s = s & " var ka=[].map.call(A.rows,rowKey),kb=[].map.call(B.rows,rowKey);" & vbCrLf
-    ' 【按首列的键配对，不能按行号】。删掉中间几行之后，后面的行整体上移，
-    ' 按行号比的话，那些【根本没变】的格子会被标成"变了"——
-    ' 指着没动过的数据说它变了，比不标还糟。
+    ' 【按首列的值配对，不能按整行文本、也不能按行号】。
+    ' 上一版这里定义了 keyOf 却没真的拿它算 ka/kb（外部验收指出这个死代码），
+    ' 实测确实是真 bug：比如"删除空列"，同一行只是少了一格，整行文本就变了，
+    ' 会被判成"这行没了、又冒出一行新的"，明明是同一行数据。
     s = s & " function keyOf(tr){return tr.cells.length?tr.cells[0].textContent.trim():'';}" & vbCrLf
-    s = s & " var skipDiff=st.hasAttribute('data-merge');" & vbCrLf
-    ' A 里有、B 里没有的整行 = 会被删掉；B 里有、A 里没有的 = 新增
-    ' 【一对一配对】：同一个键在 A 里出现多次时，不能让它们都去配 B 的同一行。
-    ' 配过的就划掉，否则"有三行都叫华东"这种情况会得出一堆假结论。
-    s = s & " if(!skipDiff){" & vbCrLf
-    s = s & "  var poolB=kb.slice(),poolA=ka.slice();" & vbCrLf
-    s = s & "  [].forEach.call(A.rows,function(tr,i){var j=poolB.indexOf(ka[i]);" & vbCrLf
-    s = s & "   if(j<0)tr.classList.add('gone');else poolB[j]=null;});" & vbCrLf
-    s = s & "  [].forEach.call(B.rows,function(tr,i){var j=poolA.indexOf(kb[i]);" & vbCrLf
-    s = s & "   if(j<0)tr.classList.add('added');else poolA[j]=null;});" & vbCrLf
-    s = s & " }" & vbCrLf
-    ' 行还在、但某几格变了 —— 按行列位置比
-    ' 【逐格比对已去掉】。它在"同一个键有多行"时必然误判，
-    ' 指着没动过的格子说"这里变了"。要强调某一格，在 help.md 里
-    ' 给它加 * 记号——由写的人说了算，比猜准。
+    ' 【跳过配对的条件是"首格是合并延续格"，不是"首格文本是空"】。
+    ' 这两者不一样：`data.deleteEmptyRows` 那类演示里，整行本来就是空的
+    ' （不是 ^ 合并出来的），它的空是真实数据，得照样参与配对才能被判
+    ' "这行没了"；只有真正靠 ^ 记号合并出来的延续行才该跳过——
+    ' 首版按"键是不是空字符串"判断，把这两种情况混一起了，
+    ' 表现是"删除空行"演示里该划掉的空行反而不划了。
+    s = s & " function isCont(tr){var c=tr.cells[0];return !!c&&c.classList.contains('gmergeup');}" & vbCrLf
+    s = s & " var ka=[].map.call(A.rows,keyOf),kb=[].map.call(B.rows,keyOf);" & vbCrLf
+    ' 【一对一配对，且记住配对结果】：同一个键出现多次时（比如合并单元格
+    ' 场景里"大区"连续几行都是同一个值），不能让它们都去抢同一行——
+    ' 配过的从池子里划掉，剩下配不上的才算真的增/删。
+    s = s & " var poolB=kb.slice(),poolA=ka.slice(),pairB=[];" & vbCrLf
+    s = s & " [].forEach.call(A.rows,function(tr,i){" & vbCrLf
+    s = s & "  if(isCont(tr)){pairB[i]=-1;return;}" & vbCrLf
+    s = s & "  var j=poolB.indexOf(ka[i]);pairB[i]=j;" & vbCrLf
+    s = s & "  if(j<0)tr.classList.add('gone');else poolB[j]=null;});" & vbCrLf
+    s = s & " [].forEach.call(B.rows,function(tr,i){" & vbCrLf
+    s = s & "  if(isCont(tr))return;" & vbCrLf
+    s = s & "  var j=poolA.indexOf(kb[i]);" & vbCrLf
+    s = s & "  if(j<0)tr.classList.add('added');else poolA[j]=null;});" & vbCrLf
+    ' 配对成功的行，再逐格比一次——这一步的配对是真的一对一（上面已经
+    ' 保证过），不会像"按整行文本"那样把不相关的行错误拿来比。
+    s = s & " pairB.forEach(function(j,i){" & vbCrLf
+    s = s & "  if(j<0)return;var ar=A.rows[i],br=B.rows[j];" & vbCrLf
+    s = s & "  [].forEach.call(br.cells,function(c,ci){var ac=ar.cells[ci];" & vbCrLf
+    s = s & "   if(ac&&ac.textContent!==c.textContent)c.classList.add('changed');});});" & vbCrLf
     ' 【^ 要真的并成一格】。只是把它清空的话，看起来还是三格，
     ' "合并"这个动作根本没演出来——而那正是这条命令的全部内容。
+    ' 【局限】：这里按 DOM 里的物理列下标找"上面那格"，如果上一行还带
+    ' 横向合并（<），物理下标和肉眼看到的列位置会对不上。当前所有演示都
+    ' 没有 ^ 和 < 混用，tests\check-help.ps1 里有静态断言拦住这种组合，
+    ' 免得踩中这个没做的角落。
     s = s & " [].forEach.call(st.querySelectorAll('.dgrid'),function(t){" & vbCrLf
+
     s = s & "  for(var r=t.rows.length-1;r>0;r--){var tr=t.rows[r];" & vbCrLf
     s = s & "   for(var c=tr.cells.length-1;c>=0;c--){var td=tr.cells[c];" & vbCrLf
     s = s & "    if(!td.classList.contains('gmergeup'))continue;" & vbCrLf

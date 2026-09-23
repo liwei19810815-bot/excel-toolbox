@@ -138,6 +138,20 @@ foreach ($sec in $sections) {
             if ($sec -notmatch '(?m)^演示后[:：]\s*\r?\n\|') {
                 $errors += "网格演示「演示后」下面没有表格行：$id（要跟着 | 单元格 | 这样的行）"
             }
+
+            # 【^（纵向合并）和 <（横向合并）不能在同一张网格里混用】。
+            # 网页端的合并 JS 按 DOM 物理列下标找"上面那格"——如果上一行
+            # 还带 colspan，物理下标和肉眼看到的列位置会对不上，合并会连错格子。
+            # 这个组合从没写对过、也没测过，宁可在这里拦下来，
+            # 也不要放一个看起来能跑、实际可能合并错位的动画出去。
+            $gridBlock = ""
+            if ($sec -match '(?ms)^演示前[:：]\s*\r?\n(.*?)(?=^演示后[:：]|\z)') { $gridBlock += $Matches[1] }
+            if ($sec -match '(?ms)^演示后[:：]\s*\r?\n(.*?)(?=^###|\z)') { $gridBlock += $Matches[1] }
+            $hasRowMerge = [regex]::IsMatch($gridBlock, '(?m)^\s*\|\s*\^\s*\|')
+            $hasColMerge = [regex]::IsMatch($gridBlock, '\|\s*<\s*\|')
+            if ($hasRowMerge -and $hasColMerge) {
+                $errors += "网格演示里 ^ 和 < 混用：$id（这个组合没有实现，会合并错位，请只用其中一种）"
+            }
         }
     }
 }
