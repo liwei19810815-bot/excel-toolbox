@@ -403,12 +403,21 @@ End Function
 
 Private Function HtmlEntry(ByVal id As String) As String
     Dim label As String, tip As String, body As String
-    label = modAction.ActionLabel(id)
     tip = modAction.ActionScreentip(id)
     body = BodyOf(id)
 
-    ' guide.* 不是命令，注册表里没有它们，标题要从帮助表取
-    If Len(label) = 0 Then label = TitleOf(id)
+    ' guide.* 不是命令，注册表里没有它们，标题要从帮助表取。
+    ' 【不能靠"ActionLabel 是不是空字符串"来判断】——ActionLabel 对
+    ' 查不到的 actionId 会把 id 原样返回当兜底（这是它给别处调用者，
+    ' 比如错误信息，用的合理默认值），所以永远不是空，guide.* 条目
+    ' 的标题会一直被判成"已经有标题"，实际显示出来的是 id 本身，
+    ' 不是 help.md 里写的中文标题。这里改成直接问注册表里有没有这个
+    ' actionId，而不是看返回值像不像"没找到"。
+    If modAction.GetAction(id) Is Nothing Then
+        label = TitleOf(id)
+    Else
+        label = modAction.ActionLabel(id)
+    End If
 
     Dim s As String
     s = "<section id=""" & Esc(id) & """>" & vbCrLf
@@ -797,7 +806,16 @@ Private Function HtmlTail() As String
     ' 【一对一配对，且记住配对结果】：同一个键出现多次时（比如合并单元格
     ' 场景里"大区"连续几行都是同一个值），不能让它们都去抢同一行——
     ' 配过的从池子里划掉，剩下配不上的才算真的增/删。
-    s = s & " var poolB=kb.slice(),poolA=ka.slice(),pairB=[];" & vbCrLf
+    ' 【池子里要先把延续行的空键挖掉】。之前只在遍历时用 isCont 跳过
+    ' 延续行本身，池子（poolA/poolB）却还是 kb/ka 的原样复制——
+    ' 延续行的空键还在池子里等着被找到。这样一张表里如果既有 ^ 延续行
+    ' 又有本身就空白的数据行（两者的 keyOf 都是空字符串），
+    ' 空白数据行的 indexOf('') 可能先找到延续行的空位，而不是另一张表
+    ' 里真正对应的空白行——增删判定就配错对象了。
+    ' 用 null 占位：indexOf('') 找不到 null，两种"空"就不会互相顶替。
+    s = s & " var poolB=kb.map(function(k,i){return isCont(B.rows[i])?null:k;});" & vbCrLf
+    s = s & " var poolA=ka.map(function(k,i){return isCont(A.rows[i])?null:k;});" & vbCrLf
+    s = s & " var pairB=[];" & vbCrLf
     s = s & " [].forEach.call(A.rows,function(tr,i){" & vbCrLf
     s = s & "  if(isCont(tr)){pairB[i]=-1;return;}" & vbCrLf
     s = s & "  var j=poolB.indexOf(ka[i]);pairB[i]=j;" & vbCrLf

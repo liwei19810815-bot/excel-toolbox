@@ -147,7 +147,11 @@ foreach ($sec in $sections) {
             $gridBlock = ""
             if ($sec -match '(?ms)^演示前[:：]\s*\r?\n(.*?)(?=^演示后[:：]|\z)') { $gridBlock += $Matches[1] }
             if ($sec -match '(?ms)^演示后[:：]\s*\r?\n(.*?)(?=^###|\z)') { $gridBlock += $Matches[1] }
-            $hasRowMerge = [regex]::IsMatch($gridBlock, '(?m)^\s*\|\s*\^\s*\|')
+            # 【不能只查第一列】。^ 出现在任何一列都会触发合并 JS 里那段
+            # 按物理列下标找"上面那格"的逻辑，不限于首列——之前的写法
+            # 要求整行必须以 "| ^ |" 开头，^ 写在第二列及以后就检测不到，
+            # 和 < 混用时照样放过一条会合并错位的演示。
+            $hasRowMerge = [regex]::IsMatch($gridBlock, '\|\s*\^\s*\|')
             $hasColMerge = [regex]::IsMatch($gridBlock, '\|\s*<\s*\|')
             if ($hasRowMerge -and $hasColMerge) {
                 $errors += "网格演示里 ^ 和 < 混用：$id（这个组合没有实现，会合并错位，请只用其中一种）"
@@ -276,6 +280,24 @@ try {
         $page = [IO.File]::ReadAllText($pagePath, [Text.UTF8Encoding]::new($false))
 
         if ($page -notmatch '<aside id="toc"') { $bad += "帮助网页里没有目录" }
+
+        # 【正文标题必须是中文标题，不能是 actionId 本身】。
+        # guide.* 不是注册命令，ActionLabel 对查不到的 id 会把 id 原样
+        # 返回当兜底——这个返回值本身不是空字符串，用"是不是空"去判断
+        # "要不要换成 help.md 里的标题"就会一直判成"已经有标题"，
+        # 实际显示出来的却是英文 actionId。这里直接断言正文标题命中
+        # help.md 写的中文，而不是退化成 id。
+        if ($page -match '(?s)<h3 class="cmd">(.*?)<code>guide\.macroTrust</code>') {
+            $guideTitle = $Matches[1]
+            if ($guideTitle -match '^\s*guide\.macroTrust\s*$') {
+                $bad += "帮助网页里 guide.macroTrust 的标题显示成了 id 本身，不是中文标题"
+            }
+            if ($guideTitle -notmatch '宏被禁用') {
+                $bad += "帮助网页里 guide.macroTrust 的标题不是 help.md 里写的中文（现在是「$($guideTitle.Trim())」）"
+            }
+        } else {
+            $bad += "帮助网页里找不到 guide.macroTrust 的标题结构"
+        }
 
         # 每个分组的标题都要在目录里出现。少一整组是最容易发生、
         # 也最容易没人发现的——比如 guide.* 不在命令注册表里，
