@@ -448,35 +448,55 @@ End Function
 '------------------------------------------------------------------------------
 Private Function MarkdownLite(ByVal src As String) As String
     Dim lines() As String, i As Long, line As String, s As String
-    Dim inDemo As Boolean, demoRows As String, demoCount As Long
+    Dim inDemo As Boolean, side As Long
+    Dim simpleRows As String, simpleCount As Long
+    Dim gridA As String, gridB As String, gridRows As Long
 
     lines = Split(Replace(src, vbCrLf, vbLf), vbLf)
     For i = LBound(lines) To UBound(lines)
         line = Trim$(lines(i))
 
-        ' 动画块在遇到下一个小标题或正文结束时收口
         If inDemo Then
-            ' 【"演示" 是两个字符】。这里原先写的是 Left$(line, 3)，
-            ' 拿 3 个字符去比一个 2 字的词，永远不相等——于是动画块
-            ' 一条都识别不出来，整块退化成普通段落。页面照常打开、
-            ' 不报任何错，只是动画没了：典型的"不报错但坏了"。
-            If Left$(line, 3) = "###" Or (Len(line) > 0 And Left$(line, 2) <> "演示") Then
-                s = s & CloseDemo(demoRows, demoCount)
-                inDemo = False
-                demoRows = ""
-                demoCount = 0
+            If Left$(line, 3) = "###" Then
+                s = s & CloseDemo(simpleRows, simpleCount, gridA, gridB, gridRows)
+                inDemo = False: side = 0
+                simpleRows = "": simpleCount = 0
+                gridA = "": gridB = "": gridRows = 0
+                ' 落到下面的小标题分支继续处理这一行
+            ElseIf Left$(line, 3) = "演示前" Then
+                side = 1
+                GoTo NextLine
+            ElseIf Left$(line, 3) = "演示后" Then
+                side = 2
+                GoTo NextLine
+            ElseIf Left$(line, 1) = "|" Then
+                ' 网格的一行
+                If side = 1 Then
+                    gridA = gridA & GridRow(line)
+                    gridRows = gridRows + 1
+                ElseIf side = 2 Then
+                    gridB = gridB & GridRow(line)
+                    gridRows = gridRows + 1
+                End If
+                GoTo NextLine
             ElseIf Left$(line, 2) = "演示" Then
                 Dim payload As String, colonPos As Long
                 colonPos = InStr(line, ":")
                 If colonPos = 0 Then colonPos = InStr(line, "：")
                 If colonPos > 0 Then
                     payload = Trim$(Mid$(line, colonPos + 1))
-                    demoRows = demoRows & DemoRow(payload)
-                    demoCount = demoCount + 1
+                    simpleRows = simpleRows & DemoRow(payload)
+                    simpleCount = simpleCount + 1
                 End If
                 GoTo NextLine
-            Else
+            ElseIf Len(line) = 0 Then
                 GoTo NextLine
+            Else
+                ' 动画块里出现了别的正文，收口后照常渲染这一行
+                s = s & CloseDemo(simpleRows, simpleCount, gridA, gridB, gridRows)
+                inDemo = False: side = 0
+                simpleRows = "": simpleCount = 0
+                gridA = "": gridB = "": gridRows = 0
             End If
         End If
 
@@ -485,13 +505,11 @@ Private Function MarkdownLite(ByVal src As String) As String
         If Left$(line, 4) = "### " Then
             Dim heading As String
             heading = Mid$(line, 5)
+            s = s & "<h4>" & Esc(heading) & "</h4>" & vbCrLf
             If InStr(heading, "动画") > 0 Then
-                s = s & "<h4>" & Esc(heading) & "</h4>" & vbCrLf
-                inDemo = True
-                demoRows = ""
-                demoCount = 0
-            Else
-                s = s & "<h4>" & Esc(heading) & "</h4>" & vbCrLf
+                inDemo = True: side = 0
+                simpleRows = "": simpleCount = 0
+                gridA = "": gridB = "": gridRows = 0
             End If
         Else
             s = s & "<p>" & Code(Bold(Esc(line))) & "</p>" & vbCrLf
@@ -499,12 +517,66 @@ Private Function MarkdownLite(ByVal src As String) As String
 NextLine:
     Next i
 
-    If inDemo Then s = s & CloseDemo(demoRows, demoCount)
+    If inDemo Then s = s & CloseDemo(simpleRows, simpleCount, gridA, gridB, gridRows)
 
     MarkdownLite = s
 End Function
 
-' 一行演示："前 → 后"。箭头两种写法都认。
+'------------------------------------------------------------------------------
+' 网格的一行：| 单元格 | 单元格 |
+'
+' 格子里的记号：
+'   *文本   这一格高亮（标记重复、条件格式上色用）
+'   <       和左边那格合并
+'   ^       和上面那格合并
+'   (空)    空单元格
+'------------------------------------------------------------------------------
+Private Function GridRow(ByVal line As String) As String
+    Dim body As String
+    body = line
+    If Left$(body, 1) = "|" Then body = Mid$(body, 2)
+    If Right$(body, 1) = "|" Then body = Left$(body, Len(body) - 1)
+
+    Dim cells() As String, i As Long, c As String, s As String, cls As String
+    cells = Split(body, "|")
+
+    s = "<tr>"
+    For i = LBound(cells) To UBound(cells)
+        c = Trim$(cells(i))
+        cls = "gc"
+
+        If c = "<" Then
+            ' 和左边合并：这一格不输出，靠左边那格的 colspan 撑开。
+            ' 【必须真的不输出】——输出一个空格子的话，看起来还是两格，
+            ' "合并"这个动作就演不出来了。
+            s = s & ""
+            GoTo NextCell
+        ElseIf c = "^" Then
+            cls = cls & " gmergeup"
+            c = ""
+        ElseIf Left$(c, 1) = "*" Then
+            cls = cls & " ghot"
+            c = Mid$(c, 2)
+        End If
+
+        ' 右边紧跟着几个 "<" 就横跨几格
+        Dim span As Long, j As Long
+        span = 1
+        For j = i + 1 To UBound(cells)
+            If Trim$(cells(j)) = "<" Then span = span + 1 Else Exit For
+        Next j
+
+        s = s & "<td class=""" & cls & """"
+        If span > 1 Then s = s & " colspan=""" & span & """"
+        s = s & ">" & Esc(c) & "</td>"
+NextCell:
+    Next i
+    s = s & "</tr>" & vbCrLf
+
+    GridRow = s
+End Function
+
+' 一行简易演示："前 → 后"。箭头两种写法都认。
 Private Function DemoRow(ByVal payload As String) As String
     Dim arrowPos As Long, before As String, after As String
     arrowPos = InStr(payload, "→")
@@ -527,14 +599,39 @@ Private Function DemoRow(ByVal payload As String) As String
     DemoRow = "<div class=""dcell"" data-a=""" & Esc(before) & """ data-b=""" & Esc(after) & """></div>" & vbCrLf
 End Function
 
-Private Function CloseDemo(ByVal rows As String, ByVal n As Long) As String
-    If n = 0 Then Exit Function
+Private Function CloseDemo(ByVal rows As String, ByVal n As Long, _
+                           ByVal gridA As String, ByVal gridB As String, _
+                           ByVal gridRows As Long) As String
+    If n = 0 And gridRows = 0 Then Exit Function
+
     Dim s As String
     s = "<div class=""demo"">" & vbCrLf
     s = s & "<div class=""dbar""><b class=""dlabel"">处理前</b>" & _
         "<button class=""dtoggle"" type=""button"">暂停</button>" & _
         "<button class=""dstep"" type=""button"">单步</button></div>" & vbCrLf
-    s = s & "<div class=""dcells"">" & vbCrLf & rows & "</div>" & vbCrLf
+
+    If gridRows > 0 Then
+        ' 【用了合并记号的网格不做增删判定】。合并不是删除：
+        ' 三行的"大区"并成一格之后，那两行还在，只是共用一个格子。
+        ' 把它们标成"已删除"是在骗人——而动画本身（一格纵跨三行）
+        ' 已经把这件事演清楚了，不需要再加标注。
+        Dim mergeFlag As String
+        mergeFlag = ""
+        If InStr(gridA, "gmergeup") > 0 Or InStr(gridB, "gmergeup") > 0 _
+           Or InStr(gridA, "colspan") > 0 Or InStr(gridB, "colspan") > 0 Then
+            mergeFlag = " data-merge=""1"""
+        End If
+        ' 两个状态各出一张表，切换时整表替换。
+        ' 【变化在哪由 JS 逐格比出来】，不在这里硬编码——
+        ' 写死的话，改了演示数据却忘了改高亮，就会指着没变的格子说"这里变了"。
+        s = s & "<div class=""dstage""" & mergeFlag & ">" & vbCrLf
+        s = s & "<table class=""dgrid gA"">" & vbCrLf & gridA & "</table>" & vbCrLf
+        s = s & "<table class=""dgrid gB"">" & vbCrLf & gridB & "</table>" & vbCrLf
+        s = s & "</div>" & vbCrLf
+    Else
+        s = s & "<div class=""dcells"">" & vbCrLf & rows & "</div>" & vbCrLf
+    End If
+
     s = s & "</div>" & vbCrLf
     CloseDemo = s
 End Function
@@ -622,6 +719,15 @@ Private Function HtmlHead(ByVal note As String) As String
             "border:1px solid #ddd;border-radius:3px;padding:4px 8px;white-space:pre;" & _
             "transition:background .25s,color .25s}" & vbCrLf
     s = s & ".dcell.changed{background:#fff6d8}" & vbCrLf
+    s = s & ".dstage{padding:8px 10px}" & vbCrLf
+    s = s & ".dgrid{border-collapse:collapse;font-size:13px;display:none}" & vbCrLf
+    s = s & ".dgrid.on{display:table}" & vbCrLf
+    s = s & ".dgrid td{border:1px solid #cfd8dc;padding:3px 10px;min-width:56px;" & _
+            "font-family:Consolas,""Courier New"",monospace;white-space:pre;background:#fff}" & vbCrLf
+    s = s & ".dgrid td.ghot{background:#ffe0e0}" & vbCrLf
+    s = s & ".dgrid td.changed{background:#fff6d8;font-weight:700}" & vbCrLf
+    s = s & ".dgrid tr.gone td{background:#fdecea;color:#b71c1c;text-decoration:line-through}" & vbCrLf
+    s = s & ".dgrid tr.added td{background:#e8f5e9}" & vbCrLf
     s = s & "@media(max-width:820px){#layout{display:block}#toc{width:auto;position:static;max-height:none;border-right:0}}" & vbCrLf
     s = s & "</style></head><body>" & vbCrLf
 
@@ -673,6 +779,50 @@ Private Function HtmlTail() As String
     s = s & "  lab.textContent=state?'处理后':'处理前';}" & vbCrLf
     s = s & " function flip(){state=state?0:1;draw();}" & vbCrLf
     s = s & " function play(){timer=setInterval(flip,1800);btn.textContent='暂停';}" & vbCrLf
+    s = s & " function pause(){clearInterval(timer);timer=null;btn.textContent='播放';}" & vbCrLf
+    s = s & " btn.addEventListener('click',function(){timer?pause():play();});" & vbCrLf
+    s = s & " step.addEventListener('click',function(){if(timer)pause();flip();});" & vbCrLf
+    s = s & " draw();play();});" & vbCrLf
+
+    ' 网格动画：两张表来回切，变化由逐格比对得出
+    s = s & "[].forEach.call(document.querySelectorAll('.demo .dstage'),function(st){" & vbCrLf
+    s = s & " var d=st.closest('.demo');" & vbCrLf
+    s = s & " var A=st.querySelector('.gA'),B=st.querySelector('.gB');" & vbCrLf
+    s = s & " var lab=d.querySelector('.dlabel'),btn=d.querySelector('.dtoggle'),step=d.querySelector('.dstep');" & vbCrLf
+    s = s & " function rowKey(tr){return [].map.call(tr.cells,function(c){return c.textContent;}).join('\u0001');}" & vbCrLf
+    s = s & " var ka=[].map.call(A.rows,rowKey),kb=[].map.call(B.rows,rowKey);" & vbCrLf
+    ' 【按首列的键配对，不能按行号】。删掉中间几行之后，后面的行整体上移，
+    ' 按行号比的话，那些【根本没变】的格子会被标成"变了"——
+    ' 指着没动过的数据说它变了，比不标还糟。
+    s = s & " function keyOf(tr){return tr.cells.length?tr.cells[0].textContent.trim():'';}" & vbCrLf
+    s = s & " var skipDiff=st.hasAttribute('data-merge');" & vbCrLf
+    ' A 里有、B 里没有的整行 = 会被删掉；B 里有、A 里没有的 = 新增
+    ' 【一对一配对】：同一个键在 A 里出现多次时，不能让它们都去配 B 的同一行。
+    ' 配过的就划掉，否则"有三行都叫华东"这种情况会得出一堆假结论。
+    s = s & " if(!skipDiff){" & vbCrLf
+    s = s & "  var poolB=kb.slice(),poolA=ka.slice();" & vbCrLf
+    s = s & "  [].forEach.call(A.rows,function(tr,i){var j=poolB.indexOf(ka[i]);" & vbCrLf
+    s = s & "   if(j<0)tr.classList.add('gone');else poolB[j]=null;});" & vbCrLf
+    s = s & "  [].forEach.call(B.rows,function(tr,i){var j=poolA.indexOf(kb[i]);" & vbCrLf
+    s = s & "   if(j<0)tr.classList.add('added');else poolA[j]=null;});" & vbCrLf
+    s = s & " }" & vbCrLf
+    ' 行还在、但某几格变了 —— 按行列位置比
+    ' 【逐格比对已去掉】。它在"同一个键有多行"时必然误判，
+    ' 指着没动过的格子说"这里变了"。要强调某一格，在 help.md 里
+    ' 给它加 * 记号——由写的人说了算，比猜准。
+    ' 【^ 要真的并成一格】。只是把它清空的话，看起来还是三格，
+    ' "合并"这个动作根本没演出来——而那正是这条命令的全部内容。
+    s = s & " [].forEach.call(st.querySelectorAll('.dgrid'),function(t){" & vbCrLf
+    s = s & "  for(var r=t.rows.length-1;r>0;r--){var tr=t.rows[r];" & vbCrLf
+    s = s & "   for(var c=tr.cells.length-1;c>=0;c--){var td=tr.cells[c];" & vbCrLf
+    s = s & "    if(!td.classList.contains('gmergeup'))continue;" & vbCrLf
+    s = s & "    var up=t.rows[r-1].cells[c];if(!up)continue;" & vbCrLf
+    s = s & "    up.rowSpan=(up.rowSpan||1)+(td.rowSpan||1);td.parentNode.removeChild(td);}}});" & vbCrLf
+    s = s & " var state=0,timer=null;" & vbCrLf
+    s = s & " function draw(){A.classList.toggle('on',!state);B.classList.toggle('on',!!state);" & vbCrLf
+    s = s & "  lab.textContent=state?'处理后':'处理前';}" & vbCrLf
+    s = s & " function flip(){state=state?0:1;draw();}" & vbCrLf
+    s = s & " function play(){timer=setInterval(flip,2000);btn.textContent='暂停';}" & vbCrLf
     s = s & " function pause(){clearInterval(timer);timer=null;btn.textContent='播放';}" & vbCrLf
     s = s & " btn.addEventListener('click',function(){timer?pause():play();});" & vbCrLf
     s = s & " step.addEventListener('click',function(){if(timer)pause();flip();});" & vbCrLf
