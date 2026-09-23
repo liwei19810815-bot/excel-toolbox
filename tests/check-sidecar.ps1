@@ -340,6 +340,53 @@ try {
     Assert-True ($r.Body -match 'excel_not_running|query_not_found|no_workbook') `
                 "不存在的查询不会被报成刷新成功"
 
+    #==========================================================================
+    Section "调用宏：只认 AI_ 前缀，不接受代码"
+    #==========================================================================
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/macros" -Token $Token
+    Assert-Equal 200 $r.Status "/macros 带令牌可用"
+    Assert-True ($r.Body -match '"ok"') "/macros 返回结构化结果"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/macros"
+    Assert-Equal 401 $r.Status "/macros 不带令牌：401"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{}'
+    Assert-Equal 400 $r.Status "调用宏不给名字：400"
+
+    # 【这是这条接口最核心的一道防线】：没有 AI_ 前缀的宏名，
+    # 请求要在真的去调用 Excel 之前就被拒绝——不能指望"Excel 没开"
+    # 之类的下游失败顺便挡住它，那样只要哪天 Excel 恰好开着，
+    # 这道门就形同虚设。
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"DeleteAllSheets"}'
+    Assert-Equal 400 $r.Status "宏名没有 AI_ 前缀：400（不去尝试调用）"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"AI_"}'
+    Assert-Equal 400 $r.Status "AI_ 后面空着：400"
+
+    # 大小写、前缀藏在中间——都不能被当成合法前缀
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"ai_lowercase"}'
+    Assert-Equal 400 $r.Status "前缀大小写不对：400"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"NotAI_Foo"}'
+    Assert-Equal 400 $r.Status "AI_ 不在开头：400"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Body '{"name":"AI_Test"}'
+    Assert-Equal 401 $r.Status "调用宏不带令牌：401"
+
+    # 【参数只能是原子值】。传对象/数组进来一律拒绝——这条接口不接受
+    # 任何"代码形状"的东西，只收字符串/数字/布尔。
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"AI_Test","args":[{"x":1}]}'
+    Assert-Equal 400 $r.Status "参数里混进对象：400"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"AI_Test","args":"not-an-array"}'
+    Assert-Equal 400 $r.Status "参数不是数组：400"
+
+    # 名字合法、参数合法，但没有 Excel——必须如实说没开，不能报成功
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"AI_NoSuchMacro_xyz","args":["a",1,true]}'
+    Assert-Equal 200 $r.Status "合法请求本身被受理"
+    Assert-True ($r.Body -match 'excel_not_running|no_workbook|macro_failed') `
+                "不存在/调不到的宏不会被报成调用成功"
+
     # 【这里不要停掉 $sc】。下面"只绑回环"那节要连它的端口，
     # 进程没了的话连接当然失败，那条断言就会【因为错误的原因变绿】——
     # 它本该证明的是"绑了回环所以外网连不上"，而不是"服务根本没在跑"。

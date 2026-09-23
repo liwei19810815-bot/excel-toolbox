@@ -58,6 +58,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 
@@ -531,6 +532,50 @@ namespace ExcelToolbox.Sidecar
                     return;
                 }
 
+                // 列出「暴露给 AI 的宏」。只读，尽力而为——枚举 VBA 工程需要
+                // 「信任对 VBA 工程对象模型的访问」，用户机上大概率没开，
+                // 枚不出来不当错误处理，如实说「枚不出来」，不是「没有宏」。
+                if (req.Method == "GET" && req.Path == "/macros")
+                {
+                    Write(stream, 200, corsOrigin, ExcelBridge.ListMacros());
+                    return;
+                }
+
+                // 调用工作簿里现成的宏。
+                //
+                // 【这是这套接口里风险最高的一条，因此约束也最严】：
+                //   1. 只认 AI_ 前缀的宏名——这是工作簿作者的显式选择，
+                //      不是"随便一个宏名都能调"。没有这个前缀，
+                //      请求在业务逻辑跑起来之前就被拒绝。
+                //   2. 只接受宏名和几个基本类型的参数（字符串/数字/布尔），
+                //      不接受代码、不接受表达式——和 refresh-query 一样的原则。
+                //   3. 调用了什么、传了什么参数，返回体里原样带回去，
+                //      方便任务窗格侧据此强制用户确认。
+                if (req.Method == "POST" && req.Path == "/run-macro")
+                {
+                    string name = ExtractJsonString(req.Body, "name");
+                    if (string.IsNullOrEmpty(name))
+                    {
+                        Write(stream, 400, corsOrigin, "{\"error\":\"missing_name\"}");
+                        return;
+                    }
+                    if (!IsAllowedMacroName(name))
+                    {
+                        Write(stream, 400, corsOrigin,
+                            "{\"error\":\"macro_not_allowed\",\"hint\":\"宏名必须以 AI_ 开头，这是工作簿作者显式暴露给 AI 的宏\"}");
+                        return;
+                    }
+                    object[] macroArgs;
+                    if (!TryExtractJsonArgs(req.Body, "args", out macroArgs))
+                    {
+                        Write(stream, 400, corsOrigin,
+                            "{\"error\":\"bad_args\",\"hint\":\"args 只能是字符串/数字/布尔组成的数组\"}");
+                        return;
+                    }
+                    Write(stream, 200, corsOrigin, ExcelBridge.RunMacro(name, macroArgs));
+                    return;
+                }
+
                 Write(stream, 404, corsOrigin, "{\"error\":\"not_found\"}");
             }
         }
@@ -554,6 +599,62 @@ namespace ExcelToolbox.Sidecar
             }
             catch { }
             return null;
+        }
+
+        // 宏名必须以 AI_ 开头，其余只允许字母数字下划线——这是工作簿作者
+        // 把某个 Sub 显式标记为"可以被 AI 调用"的方式，不是任意宏名都能调。
+        private static readonly Regex AllowedMacroNamePattern =
+            new Regex(@"^AI_[A-Za-z0-9_]+$", RegexOptions.Compiled);
+
+        private static bool IsAllowedMacroName(string name)
+        {
+            return !string.IsNullOrEmpty(name) && AllowedMacroNamePattern.IsMatch(name);
+        }
+
+        /// <summary>
+        /// 取 body 里 key 对应的数组，且【数组里只能是字符串/数字/布尔】。
+        /// 没有这个字段时返回空数组（不算错误——很多宏不需要参数）；
+        /// 字段存在但不是数组、或者里面混进了对象/数组，判成 false——
+        /// 这里不接受任何"代码形状"的东西，只收原子值。
+        /// </summary>
+        private static bool TryExtractJsonArgs(string body, string key, out object[] args)
+        {
+            args = new object[0];
+            if (string.IsNullOrEmpty(body)) { return true; }
+            try
+            {
+                var ser = new JavaScriptSerializer();
+                var map = ser.Deserialize<Dictionary<string, object>>(body);
+                if (map == null) { return true; }
+
+                object raw;
+                if (!map.TryGetValue(key, out raw) || raw == null) { return true; }
+
+                // 【不能写成 raw as object[]】。JavaScriptSerializer 把 JSON
+                // 数组反序列化成 ArrayList，不是 object[]——那样转出来是
+                // null，于是任何带参数的请求都会被判成"参数不是数组"而
+                // 拒绝，即使调用方传的明明是一个合法数组。这正是本仓库
+                // sidecar 配置解析踩过的同一个坑，写法要保持一致。
+                var seq = raw as System.Collections.IEnumerable;
+                if (seq == null || raw is string) { return false; }
+
+                var list = new List<object>();
+                foreach (var item in seq)
+                {
+                    if (item == null || item is string || item is bool ||
+                        item is int || item is long || item is double || item is decimal)
+                    {
+                        list.Add(item);
+                    }
+                    else
+                    {
+                        return false;   // 字典或数组混进来了——不是原子值，拒绝
+                    }
+                }
+                args = list.ToArray();
+                return true;
+            }
+            catch { return false; }
         }
 
         private bool Authorized(HttpRequest req)
@@ -670,6 +771,111 @@ namespace ExcelToolbox.Sidecar
                 }
                 sb.Append("]}");
                 return sb.ToString();
+            });
+        }
+
+        // 只认 Public（或不写修饰符，VBA 里默认就是 Public）的 AI_ 开头的 Sub。
+        // 【Private 的不匹配】：这一行如果是 "Private Sub AI_x(" ，前导的
+        // "Private" 不满足下面这个模式（模式只允许可选的 "Public "），
+        // 整行匹配失败——Application.Run 本来也调不动 Private 的宏，
+        // 列出来也没用，干脆不收进结果里。
+        private static readonly Regex AiSubPattern = new Regex(
+            @"(?im)^\s*(?:Public\s+)?Sub\s+(AI_[A-Za-z0-9_]+)\s*\(",
+            RegexOptions.Compiled);
+
+        public static string ListMacros()
+        {
+            return RunOnSta(delegate(object app)
+            {
+                object wb = Get(app, "ActiveWorkbook");
+                if (wb == null) { return "{\"ok\":false,\"error\":\"no_workbook\"}"; }
+
+                object vbProject;
+                try { vbProject = Get(wb, "VBProject"); }
+                catch (Exception)
+                {
+                    // 【枚不出来 ≠ 没有宏】。这几乎总是因为没开「信任对 VBA
+                    // 工程对象模型的访问」——绝大多数用户机上就是没开，
+                    // 而且不该为了"能列出宏名"这种锦上添花的功能去要求
+                    // 用户开这个权限。如实说"枚不出来"，run-macro 本身
+                    // 不需要这个权限，照样能用，只是用户得自己知道宏名。
+                    return "{\"ok\":true,\"trusted\":false,\"macros\":[]}";
+                }
+                if (vbProject == null)
+                {
+                    return "{\"ok\":true,\"trusted\":false,\"macros\":[]}";
+                }
+
+                var names = new List<string>();
+                object components = Get(vbProject, "VBComponents");
+                int count = Convert.ToInt32(Get(components, "Count"), CultureInfo.InvariantCulture);
+                for (int i = 1; i <= count; i++)
+                {
+                    object comp = Invoke(components, "Item", i);
+                    if (comp == null) { continue; }
+                    object codeModule = Get(comp, "CodeModule");
+                    if (codeModule == null) { continue; }
+
+                    int lineCount = Convert.ToInt32(Get(codeModule, "CountOfLines"), CultureInfo.InvariantCulture);
+                    if (lineCount <= 0) { continue; }
+
+                    string src = Convert.ToString(
+                        Invoke(codeModule, "Lines", 1, lineCount), CultureInfo.InvariantCulture);
+                    if (string.IsNullOrEmpty(src)) { continue; }
+
+                    foreach (Match m in AiSubPattern.Matches(src))
+                    {
+                        string n = m.Groups[1].Value;
+                        if (!names.Contains(n)) { names.Add(n); }
+                    }
+                }
+
+                var sb = new StringBuilder();
+                sb.Append("{\"ok\":true,\"trusted\":true,\"macros\":[");
+                for (int i = 0; i < names.Count; i++)
+                {
+                    if (i > 0) { sb.Append(','); }
+                    sb.Append('"').Append(JsonEscape(names[i])).Append('"');
+                }
+                sb.Append("]}");
+                return sb.ToString();
+            });
+        }
+
+        public static string RunMacro(string name, object[] args)
+        {
+            return RunOnSta(delegate(object app)
+            {
+                object wb = Get(app, "ActiveWorkbook");
+                if (wb == null) { return "{\"ok\":false,\"error\":\"no_workbook\"}"; }
+
+                var callArgs = new List<object>();
+                callArgs.Add(name);
+                if (args != null) { callArgs.AddRange(args); }
+
+                // 【调用本身不需要 VBOM 信任】——ListMacros 枚举宏名才需要，
+                // Application.Run 按名字调用是普通的 Automation 调用，
+                // 用户机上不开那个信任设置一样能用。
+                object result;
+                try
+                {
+                    result = Invoke(app, "Run", callArgs.ToArray());
+                }
+                catch (Exception ex)
+                {
+                    var inner = ex.InnerException ?? ex;
+                    // 【失败必须如实说，不能报成功】。宏名打错、宏内部抛错、
+                    // 参数个数不对，都会走到这里——用户以为宏跑了，其实没跑，
+                    // 比直接看到报错更糟。
+                    return "{\"ok\":false,\"error\":\"macro_failed\",\"name\":\"" + JsonEscape(name) +
+                           "\",\"message\":\"" + JsonEscape(inner.Message) + "\"}";
+                }
+
+                string resultText = result == null
+                    ? ""
+                    : Convert.ToString(result, CultureInfo.InvariantCulture);
+                return "{\"ok\":true,\"name\":\"" + JsonEscape(name) +
+                       "\",\"result\":\"" + JsonEscape(resultText) + "\"}";
             });
         }
 
