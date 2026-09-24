@@ -16,7 +16,7 @@
     发布目录（UNC 或本地路径）。
 
 .PARAMETER Version
-    版本号。不传就从 src\code\Core\modApp.bas 的 APP_VERSION 里读。
+    版本号。不传就从 src\excel\code\Core\modApp.bas 的 APP_VERSION 里读。
 
 .PARAMETER Rollback
     只把清单改成指定版本，不上传文件。用于回滚到已发布过的版本。
@@ -43,7 +43,7 @@ function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
 # 版本号从源码里读，避免和加载器记录的版本对不上
 if (-not $Version) {
-    $appSrc = Get-Content (Join-Path $RepoRoot "src\code\Core\modApp.bas") -Raw -Encoding UTF8
+    $appSrc = Get-Content (Join-Path $RepoRoot "src\excel\code\Core\modApp.bas") -Raw -Encoding UTF8
     $m = [regex]::Match($appSrc, 'APP_VERSION\s+As\s+String\s*=\s*"([^"]+)"')
     if (-not $m.Success) { throw "无法从 modApp.bas 读出 APP_VERSION，请用 -Version 显式指定。" }
     $Version = $m.Groups[1].Value

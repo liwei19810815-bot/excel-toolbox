@@ -288,7 +288,7 @@ Public Function ActionLabel(ByVal actionId As String) As String
     If actionId = "core.undoLast" Then
         ' 撤销按钮上直接显示待撤销的操作名，用户不用猜会撤销掉什么
         Dim lbl As String
-        lbl = modUndo.PeekLabel()
+        lbl = modHost.Host_PeekLabel()
         If Len(lbl) > 0 Then ActionLabel = "撤销 " & lbl Else ActionLabel = d.Label
         Exit Function
     End If
@@ -352,14 +352,14 @@ Public Function IsActionEnabled(ByVal actionId As String) As Boolean
     If d Is Nothing Then Exit Function
 
     If modApp.IsWps And Not d.SupportedInWps Then Exit Function
-    If d.RequiresWorkbook And ActiveWorkbook Is Nothing Then Exit Function
+    If d.RequiresWorkbook And Not modHost.Host_HasDocument() Then Exit Function
 
     ' 宿主能力探测：不支持的命令直接灰显，而不是让用户点了才看到报错。
     ' 这比在 clsActionDef 上人工维护一张"哪个宿主支持哪个 API"的表可靠——
     ' 那张表在开发机上根本没法验证，事实上也一直是空的。
     Select Case actionId
         Case "core.undoLast"
-            IsActionEnabled = modUndo.CanUndo()
+            IsActionEnabled = modHost.Host_CanUndo()
 
         Case "viz.sparklines"
             IsActionEnabled = modCaps.SupportsSparklines()
@@ -406,13 +406,13 @@ Public Sub RunAction(ByVal actionId As String)
         modTelemetry.TrackAction actionId, "blocked_wps", ElapsedMs(startedAt)
         Exit Sub
     End If
-    If d.RequiresWorkbook And ActiveWorkbook Is Nothing Then
+    If d.RequiresWorkbook And Not modHost.Host_HasDocument() Then
         Notify "请先打开一个工作簿。", vbInformation
         modTelemetry.TrackAction actionId, "blocked_nodoc", ElapsedMs(startedAt)
         Exit Sub
     End If
     If d.RequiresSelection Then
-        If TypeName(Selection) <> "Range" Then
+        If Not modHost.Host_HasValidSelection() Then
             Notify "请先选中要处理的单元格区域。", vbInformation
             modTelemetry.TrackAction actionId, "blocked_nosel", ElapsedMs(startedAt)
             Exit Sub
@@ -437,11 +437,11 @@ Public Sub RunAction(ByVal actionId As String)
     Dim txOpened As Boolean
 
     On Error GoTo Failed
-    modPerf.FastModeOn
-    modPerf.SetStatus d.Label & " 执行中…"
+    modHost.Host_FastModeOn
+    modHost.Host_SetStatus d.Label & " 执行中…"
 
     If d.Undoable Then
-        modUndo.BeginTx d.Label
+        modHost.Host_BeginUndo d.Label
         txOpened = True
     End If
 
@@ -451,10 +451,10 @@ Public Sub RunAction(ByVal actionId As String)
     ' Commit 可能因为规模超限丢弃撤销记录。它返回的警告必须原样转达，
     ' 否则用户会以为这一步能撤销。
     Dim undoWarning As String
-    If txOpened Then undoWarning = modUndo.Commit()
+    If txOpened Then undoWarning = modHost.Host_CommitUndo()
 
-    modPerf.ClearStatus
-    modPerf.FastModeOff
+    modHost.Host_ClearStatus
+    modHost.Host_FastModeOff
     modRibbon.RefreshControl "btnUndoLast"
 
     ' 结果统一在这里呈现，业务过程只负责返回文字
@@ -484,14 +484,14 @@ Failed:
         cancelRollbackOk = True
         If txOpened Then
             On Error Resume Next
-            cancelRollbackOk = modUndo.Rollback()
+            cancelRollbackOk = modHost.Host_RollbackUndo()
             If Err.Number <> 0 Then cancelRollbackOk = False
             Err.Clear
             On Error GoTo 0
         End If
 
-        modPerf.ClearStatus
-        modPerf.FastModeOff
+        modHost.Host_ClearStatus
+        modHost.Host_FastModeOff
         modRibbon.RefreshControl "btnUndoLast"
 
         If cancelRollbackOk Then
@@ -514,14 +514,14 @@ Failed:
     rollbackOk = True
     If txOpened Then
         On Error Resume Next
-        rollbackOk = modUndo.Rollback()
+        rollbackOk = modHost.Host_RollbackUndo()
         If Err.Number <> 0 Then rollbackOk = False
         Err.Clear
         On Error GoTo 0
     End If
 
-    modPerf.ClearStatus
-    modPerf.FastModeOff
+    modHost.Host_ClearStatus
+    modHost.Host_FastModeOff
     modRibbon.RefreshControl "btnUndoLast"
 
     ' 绝不声称没验证过的事：
@@ -584,8 +584,8 @@ End Function
 Private Function Dispatch(ByVal actionId As String) As String
     Select Case actionId
         ' --- Core ---
-        Case "core.undoLast":  modUndo.UndoLast
-        Case "core.resetEnv":  modPerf.FastModeReset
+        Case "core.undoLast":  modHost.Host_UndoLast
+        Case "core.resetEnv":  modHost.Host_FastModeReset
         Case "core.selfTest":  Dispatch = modApp.AboutText() & vbCrLf & vbCrLf & "加载宏工作正常。"
         Case "core.about":     Dispatch = modApp.AboutText()
         Case "core.help":      Dispatch = modHelp.ShowPane()

@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    src\code + src\package  ->  dist\ExcelToolbox.xlam
+    src\shared\code + src\excel\code + src\package  ->  dist\ExcelToolbox.xlam
 
 .DESCRIPTION
     .xlam 是 zip 二进制，无法进 git 做 diff，所以仓库里只存源码。
@@ -26,7 +26,12 @@ $RepoRoot   = Split-Path -Parent $PSScriptRoot
 
 # 校验 COM 拿到的是真 Excel 而不是 WPS（WPS 会劫持 Excel 的 COM 注册并自称 Microsoft Excel）
 . (Join-Path $PSScriptRoot "_ExcelHost.ps1")
-$CodeDir    = Join-Path $RepoRoot "src\code"
+# 【两个目录】：shared\code 是不碰 Excel 对象的框架代码（未来 PPT/Word 也会导入
+# 这一份），excel\code 是 Excel 专属实现。产物集合必须和改动前的单一 src\code
+# 完全一致——这是能拿现有断言当重组回归判据的前提。
+$SharedCodeDir = Join-Path $RepoRoot "src\shared\code"
+$ExcelCodeDir  = Join-Path $RepoRoot "src\excel\code"
+$CodeDirs      = @($SharedCodeDir, $ExcelCodeDir)
 $PackageDir = Join-Path $RepoRoot "src\package"
 $DistDir    = Join-Path $RepoRoot "dist"
 $OutPath    = Join-Path $DistDir $OutputName
@@ -167,7 +172,9 @@ function ConvertFrom-HelpMarkdown {
 #------------------------------------------------------------------------------
 # 主流程
 #------------------------------------------------------------------------------
-if (-not (Test-Path $CodeDir)) { throw "找不到源码目录：$CodeDir" }
+foreach ($d in $CodeDirs) {
+    if (-not (Test-Path $d)) { throw "找不到源码目录：$d" }
+}
 if (-not (Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir | Out-Null }
 
 $customUi = Join-Path $PackageDir "customUI\customUI14.xml"
@@ -207,9 +214,9 @@ try {
     $wb = $xl.Workbooks.Add($xlWBATWorksheet)
 
     Write-Step "导入 VBA 源码"
-    $files = Get-ChildItem -Path $CodeDir -Recurse -Include *.bas, *.cls, *.frm |
+    $files = Get-ChildItem -Path $CodeDirs -Recurse -Include *.bas, *.cls, *.frm |
              Sort-Object FullName
-    if ($files.Count -eq 0) { throw "src\code 下没有可导入的 .bas/.cls/.frm。" }
+    if ($files.Count -eq 0) { throw "src\shared\code / src\excel\code 下没有可导入的 .bas/.cls/.frm。" }
 
     $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("ExcelToolboxBuild_" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $stage | Out-Null
@@ -228,7 +235,8 @@ try {
                 throw "$($f.Name) 导入后类型为 $($comp.Type)，预期 $expected。源文件头部未被 VBE 识别。"
             }
 
-            Write-Ok $f.FullName.Substring($CodeDir.Length + 1)
+            $base = $CodeDirs | Where-Object { $f.FullName.StartsWith($_ + "\") } | Select-Object -First 1
+            Write-Ok $f.FullName.Substring($base.Length + 1)
         }
     }
     finally {
@@ -273,7 +281,7 @@ try {
     }
 
     # 文档模块不能 Import，只能往 CodeModule 里塞源码
-    $docModule = Join-Path $CodeDir "Core\ThisWorkbook.doccls"
+    $docModule = Join-Path $ExcelCodeDir "Core\ThisWorkbook.doccls"
     if (Test-Path $docModule) {
         Write-Step "注入 ThisWorkbook 文档模块"
         # 走 COM 传字符串（BSTR/UTF-16），没有编码问题，但换行仍需 CRLF

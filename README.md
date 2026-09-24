@@ -21,7 +21,8 @@
 
 | 路径 | 内容 |
 |---|---|
-| `src/code/` | VBA 源码（`.bas` / `.cls` / `.frm`），git 的唯一真相 |
+| `src/shared/code/` | 不碰 Excel 对象的框架代码（未来 PPT/Word 也会导入这一份） |
+| `src/excel/code/` | Excel 专属的 VBA 源码（`.bas` / `.cls` / `.frm`），含 60 个业务命令 |
 | `src/package/` | 需要注入 xlam 包的 XML，目前是 `customUI/customUI14.xml`（Ribbon 定义） |
 | `dist/` | 构建产物，不入 git |
 
@@ -94,14 +95,14 @@ timeout 200 powershell -ExecutionPolicy Bypass -File "tests/check-ribbon.ps1"
 > 那个框谁也看不见、谁也点不掉，脚本会永久挂起。超时即视为失败。
 > 超时后记得清掉残留的 Excel 进程，否则它会占着 `dist/ExcelToolbox.xlam`，下次构建直接失败。
 
-在 VBE 里直接改完代码后，把改动回写到 `src/code`：
+在 VBE 里直接改完代码后，把改动回写到源码目录：
 
 ```bash
 powershell -ExecutionPolicy Bypass -File "build/export.ps1"
 ```
 
-> `export.ps1` 按组件名在 `src/code` 下递归找同名文件原地覆盖，保持分层目录；
-> 新建的组件会落到 `src/code/_new`，需人工挪到对应子目录。
+> `export.ps1` 按组件名在 `src/shared/code` 和 `src/excel/code` 下递归找同名文件原地覆盖，
+> 保持分层目录；新建的组件默认落到 `src/excel/code/_new`，需人工挪到对应子目录。
 
 ---
 
@@ -385,16 +386,17 @@ Office 对象模型隐式成员重名的）都要避开。
 ## 目录
 
 ```
-src/code/Core/      基础设施（执行管线、撤销、高速模式、区域、字符串、IO、参数、事件）
-src/code/Text/      M1 单元格/文本处理
-src/code/Data/      M2 数据处理
-src/code/Sheet/     M3 工作表/工作簿管理
-src/code/Merge/     M4 多文件合并
-src/code/File/      M5 文件批处理
-src/code/Formula/   M6 公式与引用工具
-src/code/Audit/     M7 数据体检/清洗报告
-src/code/Viz/       M8 数据可视化
-src/code/Misc/      M9 辅助增强（聚光灯、身份证、金额大写等）
+src/shared/code/Core/   不碰 Excel 对象的框架代码（遥测、通用字符串、命令元数据、帮助侧边栏控件包装）
+src/excel/code/Core/    Excel 专属基础设施（执行管线、宿主契约实现、撤销、高速模式、区域、字符串、IO、参数、事件）
+src/excel/code/Text/    M1 单元格/文本处理
+src/excel/code/Data/    M2 数据处理
+src/excel/code/Sheet/   M3 工作表/工作簿管理
+src/excel/code/Merge/   M4 多文件合并
+src/excel/code/File/    M5 文件批处理
+src/excel/code/Formula/ M6 公式与引用工具
+src/excel/code/Audit/   M7 数据体检/清洗报告
+src/excel/code/Viz/     M8 数据可视化
+src/excel/code/Misc/    M9 辅助增强（聚光灯、身份证、金额大写等）
 src/loader/code/    瘦加载器（内网自动更新，独立构建，不含业务功能）
 ```
 

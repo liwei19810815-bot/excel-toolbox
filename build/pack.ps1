@@ -161,7 +161,7 @@ if ($withAI) {
 #-----------------------------------------------------------------------------
 # 2. 版本号 —— 从源码读，别手输
 #-----------------------------------------------------------------------------
-$appSrc = Get-Content (Join-Path $RepoRoot "src\code\Core\modApp.bas") -Raw -Encoding UTF8
+$appSrc = Get-Content (Join-Path $RepoRoot "src\excel\code\Core\modApp.bas") -Raw -Encoding UTF8
 $m = [regex]::Match($appSrc, 'APP_VERSION\s+As\s+String\s*=\s*"([^"]+)"')
 if (-not $m.Success) { throw "无法从 modApp.bas 读出 APP_VERSION。" }
 $Version = $m.Groups[1].Value
@@ -191,7 +191,7 @@ if ($SkipBuild) {
         $srcDirs   = @("src\loader")
         $srcFiles  = @("build\build-loader.ps1", "build\_ExcelHost.ps1")
     } else {
-        $srcDirs   = @("src\code", "src\package", "src\help")
+        $srcDirs   = @("src\shared\code", "src\excel\code", "src\package", "src\help")
         $srcFiles  = @("build\build.ps1", "build\_ExcelHost.ps1")
     }
 

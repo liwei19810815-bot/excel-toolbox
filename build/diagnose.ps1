@@ -25,9 +25,9 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 # 校验 COM 拿到的是真 Excel 而不是 WPS（WPS 会劫持 Excel 的 COM 注册并自称 Microsoft Excel）
 . (Join-Path $PSScriptRoot "_ExcelHost.ps1")
-$CodeDir  = Join-Path $RepoRoot "src\code"
+$CodeDirs = @(Join-Path $RepoRoot "src\shared\code", Join-Path $RepoRoot "src\excel\code")
 
-$files = Get-ChildItem -Path $CodeDir -Recurse -Include *.bas, *.cls, *.frm | Sort-Object FullName
+$files = Get-ChildItem -Path $CodeDirs -Recurse -Include *.bas, *.cls, *.frm | Sort-Object FullName
 if ($Count -gt $files.Count) { $Count = $files.Count }
 
 
@@ -56,7 +56,9 @@ End Function
 
     $r = $xl.Run("PingTest")
 
-    $lastName = $files[$Count - 1].FullName.Substring($CodeDir.Length + 1)
+    $lastFile = $files[$Count - 1].FullName
+    $base = $CodeDirs | Where-Object { $lastFile.StartsWith($_ + "\") } | Select-Object -First 1
+    $lastName = $lastFile.Substring($base.Length + 1)
     if ($r -eq "pong") {
         Write-Host "OK   [$Count] 含 $lastName" -ForegroundColor Green
         $script:code = 0
@@ -66,7 +68,9 @@ End Function
     }
 }
 catch {
-    $lastName = $files[$Count - 1].FullName.Substring($CodeDir.Length + 1)
+    $lastFile = $files[$Count - 1].FullName
+    $base = $CodeDirs | Where-Object { $lastFile.StartsWith($_ + "\") } | Select-Object -First 1
+    $lastName = $lastFile.Substring($base.Length + 1)
     Write-Host "FAIL [$Count] 含 $lastName" -ForegroundColor Red
     Write-Host "     $($_.Exception.Message)" -ForegroundColor Red
     $script:code = 1
