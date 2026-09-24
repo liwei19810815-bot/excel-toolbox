@@ -25,7 +25,9 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 # 校验 COM 拿到的是真 Excel 而不是 WPS（WPS 会劫持 Excel 的 COM 注册并自称 Microsoft Excel）
 . (Join-Path $PSScriptRoot "_ExcelHost.ps1")
-$CodeDirs = @(Join-Path $RepoRoot "src\shared\code", Join-Path $RepoRoot "src\excel\code")
+$SharedCodeDir = Join-Path $RepoRoot "src\shared\code"
+$ExcelCodeDir  = Join-Path $RepoRoot "src\excel\code"
+$CodeDirs      = @($SharedCodeDir, $ExcelCodeDir)
 
 $files = Get-ChildItem -Path $CodeDirs -Recurse -Include *.bas, *.cls, *.frm | Sort-Object FullName
 if ($Count -gt $files.Count) { $Count = $files.Count }
