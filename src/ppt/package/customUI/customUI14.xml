@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  PPT 工具箱选项卡（骨架阶段）。
+
+  只有一个"关于"按钮，证明 customUI 被正确加载、回调能打到 VBA。
+  真正的命令按钮等"PPT 样板命令"那一步再加——参考 Excel 那份
+  customUI14.xml 的写法（getLabel/getEnabled/getSupertip 全部动态化、
+  不写死 label），但骨架阶段只有一个固定按钮，先不引入那套机制。
+-->
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="Ribbon_OnLoad">
+  <ribbon>
+    <tabs>
+      <tab id="tabPptToolbox" label="PPT 工具箱">
+        <group id="grpCore" label="核心">
+          <button id="btnAbout" label="关于" tag="core.about" onAction="Ribbon_OnAction" size="large" />
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>

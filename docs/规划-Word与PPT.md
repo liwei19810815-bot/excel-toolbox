@@ -106,48 +106,47 @@ PowerShell COM 自动化实测出来的，构建脚本要按这些写，别照�
   和 Excel 的 `%APPDATA%\Microsoft\AddIns`（大小写不同、注意是两个
   不同目录）是同一个思路，装 PPT 加载项应该放这里。
 
-### 未解决：ribbon 版 .ppam 通过 COM 自动化加载会挂死
+### 已解决：ribbon 版 .ppam 必须完全重建 zip，不能用 ZipFile 的 Update 模式原地改
 
-**这是当前 PPT 工作真正卡住的地方，记录下来避免以后重复踩。**
+**根因和修法**（排查过程见下，结论先说）：`build.ps1` 里 `Add-CustomUI`
+函数用的是 `[System.IO.Compression.ZipFile]::Open(path, "Update")`
+原地打开已有 zip、删旧条目、加新条目、改 `_rels/.rels`。这个写法
+Excel 的 `.xlam` 完全能接受（用了很多轮，一直没事），但 PowerPoint
+对 `.ppam` 的包完整性检查明显更严格——同样的 Update 模式产出的包，
+PowerPoint 一律拒绝加载（自动化下表现为 `.Loaded = True` 卡死不返回，
+手动通过「文件→选项→加载项」界面操作则表现为明确的
+"抱歉，由于某种原因，PowerPoint 无法加载...加载项"）。
 
-用最小化的 customUI14.xml（一个静态按钮，不带 `onLoad`、不带 `idMso`、
-不带任何回调）注入到 `.ppam` 后，走
-`Application.AddIns.Add(path)` 拿到 `AddIn` 对象没问题，
-但接下来 `.Loaded = $true` 这一步**会无限期挂住**，实测等过 170 秒以上
-仍未返回，CPU 无异常占用，也枚举不到任何可见对话框（用 `EnumWindows`
-反复查过，包括查全部进程的全部可见窗口，什么都没有）。
+**修法**：不在原 zip 上做原地更新，改成**完全展开到临时目录 → 加文件 →
+改 `_rels/.rels` → 从目录重新打包成新 zip**（`ExtractToDirectory` +
+`CreateFromDirectory`，而不是 `ZipFile.Open(..., "Update")`）。
+同样的 customUI 内容，这样打包出来的 `.ppam` 真机验证**加载成功、
+功能区选项卡和按钮都正常显示**。
 
-已经系统性排除过的原因：
+排查过程记录（怎么一步步定位到这的，供类似问题参考）：
 
-- 不是 `Ribbon_OnLoad` 回调本身的问题——**去掉 `onLoad` 属性**之后，
-  纯静态 ribbon markup（一个按钮）照样挂死。
-- 不是窗口状态——`WindowState` 设不设置成最小化，结果一样。
-- 不是安全提示弹窗——`AutomationSecurity = 3`
-  （`msoAutomationSecurityForceDisable`，强制关闭全部宏安全提示）
-  设置后依然挂死。
-- 不是信任位置——文件放在 `%APPDATA%\Microsoft\Addins`（已确认是信任
-  位置）和放在 `dist\` 下，表现一样。
-- 不是同目录下多个加载项 ID 冲突——**没有任何 customUI 的 `.ppam`**
-  在同一目录下用 `AddIns.Add` + `.Loaded = $true` 是**瞬间**成功的
-  （0.04 秒），说明加载机制本身没问题，问题精确定位在"文件里带有
-  customUI 那个关系条目"这一件事上。
-- 不是 zip/OOXML 结构错误——把注入后的 `.ppam` 解压检查过
-  `_rels/.rels` 和 `customUI/customUI14.xml`，结构和 Excel 那份
-  正常工作的 `.xlam` 完全一致（同一段 `Add-CustomUI` 函数、
-  同一个命名空间 `http://schemas.microsoft.com/office/2009/07/customui`）。
+- 用最小化 customUI14.xml 注入后，`AddIns.Add(path).Loaded = True`
+  自动化调用会无限期挂住（实测等过 170 秒以上），`EnumWindows` 查不到
+  任何可见对话框——一开始怀疑是自动化环境本身的问题（消息泵、STA
+  重入之类）。
+- 改成让用户在真机上手动走「文件→选项→加载项」操作，**同样的文件在
+  手动操作下会明确报错**（不是挂死）——证明问题出在文件本身，
+  不是自动化脚本的锅。
+- 用不带功能区的 `.ppam`（A 组）秒开成功；带功能区但去掉 `onLoad`
+  回调的 `.ppam`（B 组）依然报同样的错——把问题精确定位到"文件里
+  只要带 customUI 关系条目就失败"，和回调代码无关。
+- 怀疑 `[Content_Types].xml` 缺 `customUI14.xml` 的显式 Override
+  声明（C 组：补上这条声明），**依然报错**，排除。
+- 怀疑 Group Policy 限制了 PowerPoint 的功能区自定义（Click-to-Run
+  安装常见），检查过 `HKCU/HKLM\Software\Policies\Microsoft\Office`
+  下没有任何 PowerPoint/ribbon 相关策略键，排除。
+- 最后怀疑 `ZipFile` 的 `Update` 模式本身留下了某种瑕疵（可能是
+  压缩方式、条目顺序或 central directory 元数据），改成完全展开
+  重新打包（D 组）——**真机验证通过，选项卡和按钮都正常出现**。
 
-网上查到的相近案例都是"ribbon 不出现"（安装/加载**失败但不挂起**），
-和这里"**加载本身直接挂死**"不是同一类现象，没查到直接对应的已知问题。
-
-**下一轮排查方向（本轮未做，因为需要的工具这次都不具备）**：
-
-- 用 Process Monitor 或类似工具跟一下 `.Loaded = True` 那一刻 PowerPoint
-  在等什么（文件 I/O？注册表？网络？）
-- 换一台机器 / 换一个 PowerPoint 版本复现，排除这台机器本身的问题
-  （比如某个安全软件在拦截，或者这个 PowerPoint 安装本身有问题）
-- 尝试完全跳过 COM 自动化验证这条路，改成让用户在真机上手动装一次、
-  肉眼确认功能区出现——这不是自动化测试能覆盖的，但至少能确认
-  "代码本身是好的，只是这台机器的自动化验证环境有问题"这个判断成不成立
+这个坑目前只在 `.ppam` 上验证过是真问题；`build.ps1` 给 Excel 用的
+`Add-CustomUI`（Update 模式）暂不改动，因为它对 `.xlam` 一直工作正常，
+没有回归的必要——PPT 这边的 `Add-CustomUI` 单独实现，用重建 zip 的写法。
 
 ---
 
@@ -229,7 +228,7 @@ src/
 | 步 | 内容 | 判据 | 状态 |
 |---|---|---|---|
 | 1 | 源码重组 + `modHost` 抽象（仅 Excel） | **Excel 现有断言全绿**（这是不能退的底线） | **已完成**：`src/shared/code` + `src/excel/code` 两分区，`modHost.bas` 包一层 `modPerf`/`modUndo`，409 条断言零回归（提交 `08c10c5`）。比原计划更保守——`modAction`/`modRibbon`/`modPrompt` 等实测仍有真实 Excel 耦合，没有强行塞进 shared |
-| 2 | PPT 构建管线（`build.ps1 -Host ppt`） | 产出 `.ppam`，能构建、装载、功能区出现 | 未开工 |
+| 2 | PPT 构建管线（独立脚本 `build-ppt.ps1`，未采用文档最初设想的 `build.ps1 -Host` 参数化，理由见下） | 产出 `.ppam`，能构建、装载、功能区出现 | **代码已完成，人工验证通过，自动化验证待补**：`build-ppt.ps1` + `_PptHost.ps1`（独立于 Excel 那份，不共用 `_ExcelHost.ps1`）+ `src/ppt/code/Core/{modApp,modRibbon,modPublic}.bas` + `src/ppt/package/customUI/customUI14.xml`。真机人工安装验证过——功能区选项卡、按钮回调都正常（见下方"已解决"小节的排查记录）。**`build-ppt.ps1` 本身尚未跑通一次完整的自动化构建**：这台机器的 PowerPoint COM 自动化在排查过程中（频繁创建/强杀实例）进入了不稳定状态，`New-Object -ComObject PowerPoint.Application` 时而报 `CO_E_SERVER_EXEC_FAILURE`、时而长时间卡住，但同一时刻 Excel 的 COM 自动化完全正常——判断是这台机器当前状态的问题，不是脚本逻辑问题（脚本在"启动 PowerPoint"这一步之前的所有 PowerShell 语法/路径逻辑已验证无误）。用户已同意重启电脑，**重启后需要补跑一次 `build-ppt.ps1` 走完整自动化链路**，这是本步骤唯一剩下的验证项 |
 | 3 | PPT 样板命令 3–5 个（只读检查类优先） | 闭环：构建 → 装载 → 功能区 → 执行；撤销一栏标「不可撤销」并强制确认 | 未开工 |
 | 4 | PPT 命令集补齐 | `check-help`、`check-ribbon`、`check-imagemso` 针对 PPT 全绿 | 未开工 |
 | 5 | PPT AI（Excel AI 仓库） | 任务窗格怎么接入 PPT——沿用同一 manifest 按 `Office.context.host` 分流，还是独立产品线，留到 PPT 工具箱有实际命令后再定 | 未开工，架构未定 |
