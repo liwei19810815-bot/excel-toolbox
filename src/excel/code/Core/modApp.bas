@@ -132,5 +132,6 @@ End Function
 Public Function AboutText() As String
     AboutText = APP_NAME & "  v" & APP_VERSION & vbCrLf & vbCrLf & _
                 "宿主：" & Application.Name & " " & Application.Version & "（" & HostBitness() & "）" & vbCrLf & _
-                "加载宏：" & ThisWorkbook.Name
+                "加载宏：" & ThisWorkbook.Name & vbCrLf & _
+                "发布：CBG合同管理部"
 End Function

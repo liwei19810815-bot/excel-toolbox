@@ -69,6 +69,85 @@ UI 上如实标「不可撤销」。`clsActionDef` 现有的三个标志
 
 Excel 开了不代表 Word / PPT 开了。构建脚本要**分别检测**并给出
 针对该宿主的提示。这一条不做的话，表现是"构建脚本在 Word 上莫名失败"。
+（已实测踩过一次：本机 Excel 开了这个设置，PowerPoint 没开，直到用户
+手动去 PowerPoint 的信任中心单独勾选才打通。）
+
+### PowerPoint COM 自动化的实测差异（用真实 COM 调用逐条验证过）
+
+这些都不是从文档推断的，是直接拿这台机器的 PowerPoint 16.0 通过
+PowerShell COM 自动化实测出来的，构建脚本要按这些写，别照抄 Excel 那套：
+
+- **`Application.Visible` 不能设为 `False`**——PowerPoint 直接抛异常
+  "Hiding the application window is not allowed"。Excel 的
+  `build.ps1` 里 `$xl.Visible = $false` 那种无界面构建方式在 PPT 上不成立，
+  改用 `$p.WindowState = 2`（`ppWindowMinimized`）退而求其次。
+- **`Application.EnableEvents` 属性不存在**——PowerPoint 的 Application
+  对象没有这个成员，构建脚本里对应那一行要整个跳过，不是改成别的值。
+- **`Application.DisplayAlerts` 是枚举不是布尔**——`PpAlertLevel`：
+  `ppAlertsNone = 1`、`ppAlertsAll = 2`，不能像 Excel 那样直接赋
+  `$false`/`$true`。
+- **`.ppam` 不能用 `Presentations.Open()` 打开**——会抛
+  "You must use Addins.Add to load Addin files"。必须用
+  `Application.AddIns.Add(path)` 拿到 `AddIn` 对象，再设
+  `.Loaded = $true`（这一点和 Excel `xl.AddIns.Add(...).Installed = $true`
+  的套路一致，`install\Install-Toolbox.ps1` 里就是这么给 Excel 用的）。
+- **新建的 `Presentation.VBProject` 默认零组件**——不像 Excel 的
+  `ThisWorkbook` 那样自带一个文档模块，`build.ps1` 里"文档模块不能
+  Import，只能塞 CodeModule"那一段特殊处理，PPT 这边不需要。
+- **PowerShell 里 `$app.Run(...)` 直接点调用会失败**——`Application.Run`
+  在 PowerPoint 的类型库里签名是
+  `Run(string MacroName, [ref] Params Object[] safeArrayOfParams)`，
+  这个 `ParamArray` 签名在 PowerShell 的late-bound 点调用下解析不出重载，
+  报"找不到 Run 方法或属性"。必须改用
+  `$app.GetType().InvokeMember('Run', [Reflection.BindingFlags]::InvokeMethod, $null, $app, @('MacroName'))`
+  绕过 PowerShell 自己的 COM 绑定，VBA 代码内部互相调用不受影响，
+  这纯粹是 PowerShell 测试脚本这一层的坑。
+- **`%APPDATA%\Microsoft\Addins` 已经是 PowerPoint 的信任位置**——
+  和 Excel 的 `%APPDATA%\Microsoft\AddIns`（大小写不同、注意是两个
+  不同目录）是同一个思路，装 PPT 加载项应该放这里。
+
+### 未解决：ribbon 版 .ppam 通过 COM 自动化加载会挂死
+
+**这是当前 PPT 工作真正卡住的地方，记录下来避免以后重复踩。**
+
+用最小化的 customUI14.xml（一个静态按钮，不带 `onLoad`、不带 `idMso`、
+不带任何回调）注入到 `.ppam` 后，走
+`Application.AddIns.Add(path)` 拿到 `AddIn` 对象没问题，
+但接下来 `.Loaded = $true` 这一步**会无限期挂住**，实测等过 170 秒以上
+仍未返回，CPU 无异常占用，也枚举不到任何可见对话框（用 `EnumWindows`
+反复查过，包括查全部进程的全部可见窗口，什么都没有）。
+
+已经系统性排除过的原因：
+
+- 不是 `Ribbon_OnLoad` 回调本身的问题——**去掉 `onLoad` 属性**之后，
+  纯静态 ribbon markup（一个按钮）照样挂死。
+- 不是窗口状态——`WindowState` 设不设置成最小化，结果一样。
+- 不是安全提示弹窗——`AutomationSecurity = 3`
+  （`msoAutomationSecurityForceDisable`，强制关闭全部宏安全提示）
+  设置后依然挂死。
+- 不是信任位置——文件放在 `%APPDATA%\Microsoft\Addins`（已确认是信任
+  位置）和放在 `dist\` 下，表现一样。
+- 不是同目录下多个加载项 ID 冲突——**没有任何 customUI 的 `.ppam`**
+  在同一目录下用 `AddIns.Add` + `.Loaded = $true` 是**瞬间**成功的
+  （0.04 秒），说明加载机制本身没问题，问题精确定位在"文件里带有
+  customUI 那个关系条目"这一件事上。
+- 不是 zip/OOXML 结构错误——把注入后的 `.ppam` 解压检查过
+  `_rels/.rels` 和 `customUI/customUI14.xml`，结构和 Excel 那份
+  正常工作的 `.xlam` 完全一致（同一段 `Add-CustomUI` 函数、
+  同一个命名空间 `http://schemas.microsoft.com/office/2009/07/customui`）。
+
+网上查到的相近案例都是"ribbon 不出现"（安装/加载**失败但不挂起**），
+和这里"**加载本身直接挂死**"不是同一类现象，没查到直接对应的已知问题。
+
+**下一轮排查方向（本轮未做，因为需要的工具这次都不具备）**：
+
+- 用 Process Monitor 或类似工具跟一下 `.Loaded = True` 那一刻 PowerPoint
+  在等什么（文件 I/O？注册表？网络？）
+- 换一台机器 / 换一个 PowerPoint 版本复现，排除这台机器本身的问题
+  （比如某个安全软件在拦截，或者这个 PowerPoint 安装本身有问题）
+- 尝试完全跳过 COM 自动化验证这条路，改成让用户在真机上手动装一次、
+  肉眼确认功能区出现——这不是自动化测试能覆盖的，但至少能确认
+  "代码本身是好的，只是这台机器的自动化验证环境有问题"这个判断成不成立
 
 ---
 
