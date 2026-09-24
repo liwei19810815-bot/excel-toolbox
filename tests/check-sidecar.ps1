@@ -381,11 +381,50 @@ try {
     $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"AI_Test","args":"not-an-array"}'
     Assert-Equal 400 $r.Status "参数不是数组：400"
 
-    # 名字合法、参数合法，但没有 Excel——必须如实说没开，不能报成功
+    #==========================================================================
+    Section "调用宏：光有令牌不够，必须先换到用户确认票（Codex 复核修复）"
+    #==========================================================================
+    # 【这是本轮修的高危问题】：之前只要带着 X-Toolbox-Token 就能直接
+    # POST /run-macro，等于"强制确认"只存在于任务窗格的 UI 里，sidecar
+    # 自己完全不知道用户是否点过确认——令牌一旦泄露，或允许来源被
+    # XSS/供应链攻击，就能绕过确认静默执行宏。现在 /run-macro 必须带一张
+    # /confirm-macro 发的、与本次宏名+参数完全匹配的一次性票。
+
     $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"AI_NoSuchMacro_xyz","args":["a",1,true]}'
-    Assert-Equal 200 $r.Status "合法请求本身被受理"
+    Assert-Equal 400 $r.Status "没带确认票：拒绝，不去尝试调用"
+    Assert-True ($r.Body -match 'confirm_required') "没带确认票：错误码是 confirm_required"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body '{"name":"AI_NoSuchMacro_xyz","args":["a",1,true],"confirmToken":"deadbeef"}'
+    Assert-Equal 400 $r.Status "确认票是瞎编的：拒绝"
+    Assert-True ($r.Body -match 'confirm_invalid') "瞎编的确认票：错误码是 confirm_invalid"
+
+    # 换票本身不执行任何宏——只是发一张票
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/confirm-macro" -Method "POST" -Token $Token -Body '{"name":"AI_NoSuchMacro_xyz","args":["a",1,true]}'
+    Assert-Equal 200 $r.Status "/confirm-macro 受理合法宏名+参数"
+    $confirmMatch = [regex]::Match($r.Body, '"confirmToken":"([0-9a-f]+)"')
+    Assert-True $confirmMatch.Success "/confirm-macro 返回了 confirmToken"
+    $ticket = $confirmMatch.Groups[1].Value
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/confirm-macro" -Method "POST" -Body '{"name":"AI_NoSuchMacro_xyz","args":["a",1,true]}'
+    Assert-Equal 401 $r.Status "/confirm-macro 也要令牌，不能绕过"
+
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body "{`"name`":`"AI_NoSuchMacro_xyz`",`"args`":[`"a`",1,true],`"confirmToken`":`"$ticket`"}"
+    Assert-Equal 200 $r.Status "带着匹配的确认票：合法请求本身被受理"
     Assert-True ($r.Body -match 'excel_not_running|no_workbook|macro_failed') `
                 "不存在/调不到的宏不会被报成调用成功"
+
+    # 【票是一次性的】：上面那次请求已经把它用掉了，同一张票不能重放
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body "{`"name`":`"AI_NoSuchMacro_xyz`",`"args`":[`"a`",1,true],`"confirmToken`":`"$ticket`"}"
+    Assert-Equal 400 $r.Status "同一张确认票用第二次：拒绝（不能重放）"
+    Assert-True ($r.Body -match 'confirm_invalid') "重放确认票：错误码是 confirm_invalid"
+
+    # 【票绑定的是具体这次调用】：换个参数，原来那张票就不认了——
+    # 不能拿"确认过调 AI_Foo()"的票去调 AI_Foo("危险参数")。
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/confirm-macro" -Method "POST" -Token $Token -Body '{"name":"AI_NoSuchMacro_xyz","args":["a",1,true]}'
+    $ticket2 = [regex]::Match($r.Body, '"confirmToken":"([0-9a-f]+)"').Groups[1].Value
+    $r = Invoke-Sidecar -Port $sc.Port -Path "/run-macro" -Method "POST" -Token $Token -Body "{`"name`":`"AI_NoSuchMacro_xyz`",`"args`":[`"different`"],`"confirmToken`":`"$ticket2`"}"
+    Assert-Equal 400 $r.Status "确认票绑定的参数和本次调用的参数不一致：拒绝"
+    Assert-True ($r.Body -match 'confirm_invalid') "参数对不上：错误码是 confirm_invalid"
 
     # 【这里不要停掉 $sc】。下面"只绑回环"那节要连它的端口，
     # 进程没了的话连接当然失败，那条断言就会【因为错误的原因变绿】——

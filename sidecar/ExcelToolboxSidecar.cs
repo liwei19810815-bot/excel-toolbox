@@ -57,6 +57,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -389,6 +390,34 @@ namespace ExcelToolbox.Sidecar
         private const int MaxHeaderBytes = 8 * 1024;
         private const int MaxBodyBytes = 1024 * 1024;
 
+        //---------------------------------------------------------------------
+        // 【调用宏的二次确认令牌】
+        //
+        // 光有 X-Toolbox-Token 不够——那个令牌只证明"这个页面在白名单里、
+        // 拿到了令牌"，不证明"用户点了确认弹窗"。任务窗格的 mutate:structure
+        // 确认只是 UI 策略，sidecar 完全不知道这件事，等于强制确认可以被
+        // 绕过（持有令牌就能直接 POST /run-macro）。
+        //
+        // 所以把"确认"这件事下沉一步：任务窗格在用户点了确认之后，
+        // 先调 /confirm-macro 换一张一次性、短时效、绑定"这个宏名 + 这些
+        // 参数"的确认票；/run-macro 必须带着与本次调用完全匹配的票才放行，
+        // 用一次就作废，换宏名或换参数原来的票就不认了。
+        //
+        // 这挡不住"可信来源自己被 XSS/供应链攻击"这种终极场景（那种场景下
+        // 攻击脚本本来就能调用任务窗格能调用的一切），但能堵住"普通令牌
+        // 单独泄露给白名单外/未触发过确认流程的调用方就能静默执行宏"。
+        //---------------------------------------------------------------------
+        private readonly Dictionary<string, ConfirmTicket> _confirmTickets =
+            new Dictionary<string, ConfirmTicket>();
+        private readonly object _confirmLock = new object();
+        private static readonly TimeSpan ConfirmTicketTtl = TimeSpan.FromSeconds(120);
+
+        private sealed class ConfirmTicket
+        {
+            public string ArgsKey;
+            public DateTime ExpiresAtUtc;
+        }
+
         public SidecarServer(SidecarConfig cfg) { _cfg = cfg; }
 
         public int Port { get { return _port; } }
@@ -541,6 +570,47 @@ namespace ExcelToolbox.Sidecar
                     return;
                 }
 
+                // 换一张"用户已确认"的一次性票。任务窗格在弹窗确认之后才调这个，
+                // 不是在调用宏之前自动帮用户调——这一步本身不执行任何宏。
+                if (req.Method == "POST" && req.Path == "/confirm-macro")
+                {
+                    string cname = ExtractJsonString(req.Body, "name");
+                    if (string.IsNullOrEmpty(cname))
+                    {
+                        Write(stream, 400, corsOrigin, "{\"error\":\"missing_name\"}");
+                        return;
+                    }
+                    if (!IsAllowedMacroName(cname))
+                    {
+                        Write(stream, 400, corsOrigin,
+                            "{\"error\":\"macro_not_allowed\",\"hint\":\"宏名必须以 AI_ 开头，这是工作簿作者显式暴露给 AI 的宏\"}");
+                        return;
+                    }
+                    object[] cargs;
+                    if (!TryExtractJsonArgs(req.Body, "args", out cargs))
+                    {
+                        Write(stream, 400, corsOrigin,
+                            "{\"error\":\"bad_args\",\"hint\":\"args 只能是字符串/数字/布尔组成的数组\"}");
+                        return;
+                    }
+
+                    string ticketToken = GenerateConfirmToken();
+                    string argsKey = CanonicalArgsKey(cname, cargs);
+                    lock (_confirmLock)
+                    {
+                        PruneExpiredConfirmTickets();
+                        _confirmTickets[ticketToken] = new ConfirmTicket
+                        {
+                            ArgsKey = argsKey,
+                            ExpiresAtUtc = DateTime.UtcNow.Add(ConfirmTicketTtl)
+                        };
+                    }
+                    Write(stream, 200, corsOrigin, string.Format(CultureInfo.InvariantCulture,
+                        "{{\"ok\":true,\"confirmToken\":\"{0}\",\"expiresInSeconds\":{1}}}",
+                        ticketToken, (int)ConfirmTicketTtl.TotalSeconds));
+                    return;
+                }
+
                 // 调用工作簿里现成的宏。
                 //
                 // 【这是这套接口里风险最高的一条，因此约束也最严】：
@@ -549,8 +619,10 @@ namespace ExcelToolbox.Sidecar
                 //      请求在业务逻辑跑起来之前就被拒绝。
                 //   2. 只接受宏名和几个基本类型的参数（字符串/数字/布尔），
                 //      不接受代码、不接受表达式——和 refresh-query 一样的原则。
-                //   3. 调用了什么、传了什么参数，返回体里原样带回去，
-                //      方便任务窗格侧据此强制用户确认。
+                //   3. 必须带一张 /confirm-macro 发的、与本次宏名+参数完全匹配的
+                //      confirmToken，否则拒绝执行——光有 X-Toolbox-Token 不够，
+                //      那只证明"来源在白名单里"，不证明"用户点了确认"。
+                //      详见上面 _confirmTickets 那段注释。
                 if (req.Method == "POST" && req.Path == "/run-macro")
                 {
                     string name = ExtractJsonString(req.Body, "name");
@@ -572,6 +644,34 @@ namespace ExcelToolbox.Sidecar
                             "{\"error\":\"bad_args\",\"hint\":\"args 只能是字符串/数字/布尔组成的数组\"}");
                         return;
                     }
+
+                    string confirmToken = ExtractJsonString(req.Body, "confirmToken");
+                    if (string.IsNullOrEmpty(confirmToken))
+                    {
+                        Write(stream, 400, corsOrigin,
+                            "{\"error\":\"confirm_required\",\"hint\":\"先调用 /confirm-macro 换取确认令牌，用户确认后才能执行\"}");
+                        return;
+                    }
+
+                    string expectedKey = CanonicalArgsKey(name, macroArgs);
+                    bool ticketOk;
+                    lock (_confirmLock)
+                    {
+                        PruneExpiredConfirmTickets();
+                        ConfirmTicket ticket;
+                        ticketOk = _confirmTickets.TryGetValue(confirmToken, out ticket)
+                            && ticket.ExpiresAtUtc >= DateTime.UtcNow
+                            && ticket.ArgsKey == expectedKey;
+                        // 一次性：不管这次匹不匹配，用过（或试过）就废掉，不能被重放。
+                        _confirmTickets.Remove(confirmToken);
+                    }
+                    if (!ticketOk)
+                    {
+                        Write(stream, 400, corsOrigin,
+                            "{\"error\":\"confirm_invalid\",\"hint\":\"确认令牌无效、已过期，或与本次宏名/参数不匹配，请重新确认\"}");
+                        return;
+                    }
+
                     Write(stream, 200, corsOrigin, ExcelBridge.RunMacro(name, macroArgs));
                     return;
                 }
@@ -655,6 +755,46 @@ namespace ExcelToolbox.Sidecar
                 return true;
             }
             catch { return false; }
+        }
+
+        /// <summary>256 位随机确认票。攻击者拿不到就没法伪造"用户已确认"。</summary>
+        private static string GenerateConfirmToken()
+        {
+            var bytes = new byte[32];
+            using (var rng = new RNGCryptoServiceProvider()) { rng.GetBytes(bytes); }
+            var sb = new StringBuilder(bytes.Length * 2);
+            for (int i = 0; i < bytes.Length; i++) { sb.Append(bytes[i].ToString("x2", CultureInfo.InvariantCulture)); }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 把宏名 + 参数序列化成一个规范字符串，票据据此和"本次调用"绑死——
+        /// 换个宏名或换个参数，原来那张确认票就不再匹配。
+        /// </summary>
+        private static string CanonicalArgsKey(string name, object[] args)
+        {
+            var sb = new StringBuilder();
+            sb.Append(name).Append('|').Append(args.Length);
+            foreach (var a in args)
+            {
+                sb.Append('|');
+                if (a == null) { sb.Append("null"); }
+                else { sb.Append(a.GetType().Name).Append(':').Append(Convert.ToString(a, CultureInfo.InvariantCulture)); }
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>清掉过期票，防止长时间运行后字典无限增长。调用前必须已持有 _confirmLock。</summary>
+        private void PruneExpiredConfirmTickets()
+        {
+            if (_confirmTickets.Count == 0) { return; }
+            var now = DateTime.UtcNow;
+            var expired = new List<string>();
+            foreach (var kv in _confirmTickets)
+            {
+                if (kv.Value.ExpiresAtUtc < now) { expired.Add(kv.Key); }
+            }
+            foreach (var k in expired) { _confirmTickets.Remove(k); }
         }
 
         private bool Authorized(HttpRequest req)
@@ -779,9 +919,21 @@ namespace ExcelToolbox.Sidecar
         // "Private" 不满足下面这个模式（模式只允许可选的 "Public "），
         // 整行匹配失败——Application.Run 本来也调不动 Private 的宏，
         // 列出来也没用，干脆不收进结果里。
+        //
+        // 【行首是 ' 的不匹配】：(?!\s*') 排除注释行，比如
+        // "' Sub AI_Foo(" 这种写在注释里的伪声明不会被当成真宏。
         private static readonly Regex AiSubPattern = new Regex(
-            @"(?im)^\s*(?:Public\s+)?Sub\s+(AI_[A-Za-z0-9_]+)\s*\(",
+            @"(?im)^(?!\s*')\s*(?:Public\s+)?Sub\s+(AI_[A-Za-z0-9_]+)\s*\(",
             RegexOptions.Compiled);
+
+        // VBA 续行符" _"后面跟换行——声明可能写成
+        //   Public Sub AI_Foo _
+        //       (arg1 As String)
+        // 先把续行拼接成一行再跑 AiSubPattern，否则名字和括号被换行隔开，
+        // 声明会被漏掉（漏掉≠禁止调用，run-macro 该有的正则校验独立存在，
+        // 只是模型会以为这个宏不存在）。
+        private static readonly Regex LineContinuationPattern = new Regex(
+            @"[ \t]_[ \t]*\r?\n", RegexOptions.Compiled);
 
         public static string ListMacros()
         {
@@ -792,13 +944,19 @@ namespace ExcelToolbox.Sidecar
 
                 object vbProject;
                 try { vbProject = Get(wb, "VBProject"); }
-                catch (Exception)
+                catch (COMException)
                 {
                     // 【枚不出来 ≠ 没有宏】。这几乎总是因为没开「信任对 VBA
                     // 工程对象模型的访问」——绝大多数用户机上就是没开，
                     // 而且不该为了"能列出宏名"这种锦上添花的功能去要求
                     // 用户开这个权限。如实说"枚不出来"，run-macro 本身
                     // 不需要这个权限，照样能用，只是用户得自己知道宏名。
+                    //
+                    // 【只吃 COMException】：VBProject 属性被拒绝访问时，
+                    // 后期绑定的 InvokeMember 抛的就是这个类型。其他类型的
+                    // 异常不代表"没开信任"，让它们照常往外传，走到 RunOnSta
+                    // 统一的 com_failed 分支——那才是如实反映"枚举出错了"，
+                    // 而不是被误判成"用户没开权限"。
                     return "{\"ok\":true,\"trusted\":false,\"macros\":[]}";
                 }
                 if (vbProject == null)
@@ -823,7 +981,8 @@ namespace ExcelToolbox.Sidecar
                         Invoke(codeModule, "Lines", 1, lineCount), CultureInfo.InvariantCulture);
                     if (string.IsNullOrEmpty(src)) { continue; }
 
-                    foreach (Match m in AiSubPattern.Matches(src))
+                    string joined = LineContinuationPattern.Replace(src, " ");
+                    foreach (Match m in AiSubPattern.Matches(joined))
                     {
                         string n = m.Groups[1].Value;
                         if (!names.Contains(n)) { names.Add(n); }
