@@ -137,9 +137,15 @@ function Clear-StalePpt {
 # 这条约束写进了 New-RealPpt 的调用方需知（build-ppt.ps1 里会先检查）。
 #------------------------------------------------------------------------------
 function Get-PptIdentity {
-    param($App, [int]$Retries = 10)
+    # $Before 必须是调用方在 New-Object 创建 COM 实例【之前】拍的快照——
+    # 这里不能自己现拍，等传进来的时候新进程往往已经在跑了（COM 激活是
+    # 同步的，New-Object 一返回进程就已存在），自拍快照会把新进程也算进
+    # "之前就有"，导致后面的差集永远是空的，每次都超时返回 $null。
+    # 这正是 Codex 验收挑出的问题：Register-PptInstance 原先在 New-Object
+    # 之后才调用本函数、且本函数自己现拍快照，两个时机撞在一起。
+    param($App, $Before, [int]$Retries = 10)
 
-    $before = @(Get-Process -Name POWERPNT -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+    $before = @($Before)
 
     for ($i = 0; $i -lt $Retries; $i++) {
         try {
@@ -206,9 +212,9 @@ function Stop-UnregisteredPpt {
 }
 
 function Register-PptInstance {
-    param($App)
+    param($App, $Before)
 
-    $own = Get-PptIdentity $App
+    $own = Get-PptIdentity $App $Before
     if (-not $own) {
         Stop-UnregisteredPpt $App $null
         throw "取不到 PowerPoint 实例的进程身份（HWND 或启动时间不可用）。已尝试关闭并中止。"
@@ -291,8 +297,9 @@ function New-RealPpt {
 
     Clear-StalePpt
 
+    $before = @(Get-Process -Name POWERPNT -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
     $ppt = New-Object -ComObject PowerPoint.Application
-    Register-PptInstance $ppt
+    Register-PptInstance $ppt $before
 
     $path = ""; $name = ""; $ver = ""
     try { $path = $ppt.Path } catch {}
