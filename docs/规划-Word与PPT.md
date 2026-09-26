@@ -1,7 +1,8 @@
 # 规划：Word 与 PowerPoint 支持
 
 > 状态：**二期已完成并推送**（PPT 工具箱骨架 + PPT AI）。**三期进行中**
-> （Word 构建管线骨架已落地，见第五节）。本文只定方向和判据，不是承诺的排期。
+> （Word 构建管线骨架 + Word AI 已落地并推送，Word 样板命令未开工，见第五节）。
+> 本文只定方向和判据，不是承诺的排期。
 
 ## 为什么当初砍掉，现在能捡回来
 
@@ -270,7 +271,7 @@ src/
 | 5 | PPT AI（Excel AI 仓库） | 任务窗格怎么接入 PPT——沿用同一 manifest 按 `Office.context.host` 分流，还是独立产品线 | **架构已定并落地**：沿用同一 manifest/bundle，运行时按 `Office.context.host` 分流（`src/store/host.ts`），复用 chat/session/settings/sidecar 客户端（本来就是宿主无关的）。新增 `src/powerpoint/{coordinator,blueprint}.ts`、四个 PPT 工具（`get_presentation_overview`/`read_slide`/`add_text_box`/`add_slide`）、`EXCEL_TOOL_NAMES`/`POWERPOINT_TOOL_NAMES` 按宿主过滤工具列表、manifest 新增 `Presentation` Host 块。`npx tsc --noEmit`/`npx vitest run`（130/130）/`npm run build` 全过，已提交（`354fda8`，未推送）。**两项未完成**：①这台机器 PowerPoint 环境不稳定，没做过真机侧载验证；②Codex 独立验收三次尝试都因账号侧模型配置问题失败（"gpt-6-luna"/"gpt-5.3-codex" 均报 "not supported when using Codex with a ChatGPT account"），需要用户跑 `/codex:setup` 排查，推送前应补这轮验收 |
 | 6（三期第一步） | Word 构建管线（独立脚本 `build-word.ps1` + `_WordHost.ps1`） | 产出 `.dotm`，能构建、装载、功能区出现 | **代码已完成，静态验证已过，端到端自动化被这台机器的一个前置条件挡住**：`build-word.ps1` + `_WordHost.ps1`（独立于 `_ExcelHost.ps1`/`_PptHost.ps1`）+ `src/word/code/Core/{modApp,modRibbon,modPublic}.bas` + `src/word/package/customUI/customUI14.xml`。PowerShell 语法、XML 结构、VBA 源码 BOM 编码都已核对；`SaveAs` 格式常量、`DisplayAlerts`/`Hwnd`/`Visible` 等宿主差异都用真实 COM 调用逐条验证过（见上方"Word COM 自动化的实测差异"）。**卡住的地方**：这台机器 Word 的「信任对 VBA 工程对象模型的访问」没开（Excel/PowerPoint 都开了，Word 没有），这是安全设置，不能由自动化脚本代为打开，需要用户手动去 Word 信任中心勾选后才能跑通一次真实构建 |
 | 7（三期第二步） | Word 样板命令 3–5 个（排版清理类优先，见第四节） | 闭环：构建 → 装载 → 功能区 → 执行；撤销走**原生 `Application.UndoRecord`**（比 Excel 简单） | 未开工 |
-| 8（三期第三步） | Word AI（Excel AI 仓库，第三个 `Office.context.host` 分支） | 参照 PPT AI 的接入方式：新增 `src/word/coordinator.ts`/`blueprint.ts`、`WORD_TOOL_NAMES`、manifest 新增 `Document` Host 块 | 未开工 |
+| 8（三期第三步） | Word AI（Excel AI 仓库，第三个 `Office.context.host` 分支） | 参照 PPT AI 的接入方式：新增 `src/word/coordinator.ts`/`blueprint.ts`、`WORD_TOOL_NAMES`、manifest 新增 `Document` Host 块 | **已完成并推送**：`src/word/{coordinator,blueprint}.ts` 镜像 PPT 那两个文件，`WordApi` 用到的每个方法（`body.paragraphs`/`getSelection`/`insertText`/`search`）都用 `@types/office-js` 的类型定义核实过是 1.1 基线，不是猜的版本号。四个工具：`get_document_overview`/`read_paragraph`（read）、`insert_paragraph`/`replace_text`（mutate:structure——理由和 PPT 一致，VBA 侧"Word 原生 UndoRecord 更简单"说的是 COM 自动化那条路，不能套到 Office.js 任务窗格上）。`ChatPane.tsx` 的工具禁用逻辑从二元判断改成三态，`host=unknown` 仍兜底按 Excel 处理。manifest 新增 `Document` Host 块，`office-addin-manifest validate` 三个宿主全过。Codex 两轮复审：第一轮挑出 `replace_text` 的 `find` 参数没校验 255 字符上限（`Body.search` 文档写明的限制），修复后第二轮 PASS。`npx tsc --noEmit`/`npx vitest run`（141/141）/`npm run build` 全绿，已推送。**未验证**：真机在 Word 里侧载打开任务窗格——理论上 Office.js 加载项走 manifest 侧载，不经过 COM 自动化导入 VBA 那条路，不受这台机器 Word VBOM 信任设置的限制，但没有条件实测确认 |
 
 ### 测试要新增的
 
