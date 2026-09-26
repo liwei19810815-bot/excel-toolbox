@@ -74,9 +74,16 @@ End Function
 ' （Excel 侧已经踩过两次，代价是静默删汉字），第一版写这个函数时
 ' 直接用了 AscW，属于重蹈覆辙，改用 CodePointOf 修正。
 Private Function TrimParagraphMark(ByVal text As String) As String
+    ' 【不能写成 Do While Len(s) > 0 And CodePointOf(...) < 32】：VBA 的
+    ' And 不是短路求值，两边都会算——s 被砍成空字符串后，下一轮还是会
+    ' 去算 CodePointOf(Right$("", 1))，Right$ 返回 ""，AscW("") 直接
+    ' 抛运行时错误（"无效的过程调用或参数"）。Word 文档结尾总有一个
+    ' 只剩段落标记的空段落，这个 bug 会让 word.audit 每次扫到那一段
+    ' 就崩——是 Codex 复审用真实 VBA 短路求值规则挑出来的，不是靠猜的。
     Dim s As String
     s = text
-    Do While Len(s) > 0 And modStr.CodePointOf(Right$(s, 1)) < 32
+    Do While Len(s) > 0
+        If modStr.CodePointOf(Right$(s, 1)) >= 32 Then Exit Do
         s = Left$(s, Len(s) - 1)
     Loop
     TrimParagraphMark = s
