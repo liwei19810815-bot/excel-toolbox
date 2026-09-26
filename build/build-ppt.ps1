@@ -182,7 +182,16 @@ try {
     $pres = $ppt.Presentations.Add($true)
 
     Write-Step "导入 VBA 源码"
+    # 【modAction.bas 暂不给 PPT 用】：它调用 modPrompt/modTelemetry/modHelp/
+    # modActionRegistry.RegisterAll/modActionRegistry.Dispatch，这几个
+    # PPT 工程里都还没有（PPT 的 Ribbon_OnAction 目前直接弹 MsgBox，
+    # 完全没经过 RunAction）。如果不排除，会编译出"Sub 或 Function 未定义"
+    # 的加载项——Office 的 SaveAs 不会在这一步报错，只会静默产出损坏的
+    # 文件，等真正调用时才炸，这是 Codex 复审挑出的真实问题。等 PPT 也
+    # 有了自己的 modHost.bas + modActionRegistry.bas（"PPT 样板命令"那步）
+    # 再把这一条排除去掉。
     $files = Get-ChildItem -Path $CodeDirs -Recurse -Include *.bas, *.cls, *.frm |
+             Where-Object { $_.Name -ne "modAction.bas" } |
              Sort-Object FullName
     if ($files.Count -eq 0) { throw "src\shared\code / src\ppt\code 下没有可导入的 .bas/.cls/.frm。" }
 
