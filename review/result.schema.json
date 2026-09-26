@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["requestId", "commit", "status", "startedAt", "finishedAt", "summary"],
+  "properties": {
+    "requestId": { "type": "string", "minLength": 1 },
+    "commit": { "type": "string", "minLength": 7 },
+    "status": { "enum": ["running", "passed", "failed", "error"] },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "model": { "type": "string" },
+    "summary": { "type": "string" },
+    "findings": { "type": "array", "items": { "type": "string" } },
+    "rawOutput": { "type": "string" },
+    "exitCode": { "type": ["integer", "null"] }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,11 @@
+{
+  "name": "excel-toolbox-macro",
+  "private": true,
+  "description": "仅用于承载 Codex 复审桥接脚本（VBA/PowerShell 主体本身不需要 npm）。",
+  "scripts": {
+    "review:request": "node scripts/review/request.mjs",
+    "review:dispatch": "node scripts/review/dispatch.mjs",
+    "review:poll": "node scripts/review/poll.mjs",
+    "review:run": "node scripts/review/run.mjs"
+  }
+}

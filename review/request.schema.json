@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["requestId", "commit", "createdAt", "repo"],
+  "properties": {
+    "requestId": { "type": "string", "minLength": 1 },
+    "commit": { "type": "string", "minLength": 7 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "repo": { "type": "string", "minLength": 1 },
+    "instructions": { "type": "string" },
+    "attempt": { "type": "integer", "minimum": 1 }
+  },
+  "additionalProperties": false
+}
