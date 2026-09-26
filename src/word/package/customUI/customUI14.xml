@@ -1,16 +1,37 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <!--
-  Word 工具箱选项卡（骨架阶段）。
+  Word 工具箱选项卡。
 
-  只有一个"关于"按钮，证明 customUI 被正确加载、回调能打到 VBA。
-  真正的命令按钮等"Word 样板命令"那一步再加。
+  "关于"按钮的回调直接写在 modRibbon.Ribbon_OnAction 里（不经过
+  RunAction/modActionRegistry），其余三个是首批样板命令，走完整管线。
+
+  imageMso 全部复用 Excel 工具箱已经验收过的 ID（见
+  docs/图标验收记录.md）——imageMso 是 Office 全局图标集，不是逐应用
+  各自一套，Excel 里能画出来的 ID 在 Word 里同样有效；但没有在 Word
+  的功能区里实际肉眼看过一遍，按项目自己的规矩（"存在不等于画得出来"）
+  这一条仍然算未验证，等真机能装上这个 .dotm 时补验收。
 -->
 <customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="Ribbon_OnLoad">
   <ribbon>
     <tabs>
       <tab id="tabWordToolbox" label="Word 工具箱">
         <group id="grpCore" label="核心">
-          <button id="btnAbout" label="关于" tag="core.about" onAction="Ribbon_OnAction" size="large" />
+          <button id="btnAbout" label="关于" tag="core.about" onAction="Ribbon_OnAction"
+                  imageMso="Info" size="large" />
+        </group>
+        <group id="grpCommands" label="命令">
+          <button id="btnAudit" tag="word.audit" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="ErrorChecking" size="large" />
+          <button id="btnCleanSpaces" tag="word.cleanSpaces" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="TextBoxInsert" size="large" />
+          <button id="btnUpdateFields" tag="word.updateFields" onAction="Ribbon_OnAction"
+                  getLabel="Ribbon_GetLabel" getEnabled="Ribbon_GetEnabled"
+                  getSupertip="Ribbon_GetSupertip"
+                  imageMso="Refresh" size="large" />
         </group>
       </tab>
     </tabs>

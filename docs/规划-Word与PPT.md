@@ -1,7 +1,8 @@
 # 规划：Word 与 PowerPoint 支持
 
 > 状态：**二期已完成并推送**（PPT 工具箱骨架 + PPT AI）。**三期进行中**
-> （Word 构建管线骨架 + Word AI 已落地并推送，Word 样板命令未开工，见第五节）。
+> （Word 构建管线骨架 + Word AI + 首批三个样板命令已落地，见第五、八节；
+> `modAction` 已按第八节方案拆成 shared + 各宿主 modActionRegistry）。
 > 本文只定方向和判据，不是承诺的排期。
 
 ## 为什么当初砍掉，现在能捡回来
@@ -270,7 +271,7 @@ src/
 | 4 | PPT 命令集补齐 | `check-help`、`check-ribbon`、`check-imagemso` 针对 PPT 全绿 | 未开工 |
 | 5 | PPT AI（Excel AI 仓库） | 任务窗格怎么接入 PPT——沿用同一 manifest 按 `Office.context.host` 分流，还是独立产品线 | **架构已定并落地**：沿用同一 manifest/bundle，运行时按 `Office.context.host` 分流（`src/store/host.ts`），复用 chat/session/settings/sidecar 客户端（本来就是宿主无关的）。新增 `src/powerpoint/{coordinator,blueprint}.ts`、四个 PPT 工具（`get_presentation_overview`/`read_slide`/`add_text_box`/`add_slide`）、`EXCEL_TOOL_NAMES`/`POWERPOINT_TOOL_NAMES` 按宿主过滤工具列表、manifest 新增 `Presentation` Host 块。`npx tsc --noEmit`/`npx vitest run`（130/130）/`npm run build` 全过，已提交（`354fda8`，未推送）。**两项未完成**：①这台机器 PowerPoint 环境不稳定，没做过真机侧载验证；②Codex 独立验收三次尝试都因账号侧模型配置问题失败（"gpt-6-luna"/"gpt-5.3-codex" 均报 "not supported when using Codex with a ChatGPT account"），需要用户跑 `/codex:setup` 排查，推送前应补这轮验收 |
 | 6（三期第一步） | Word 构建管线（独立脚本 `build-word.ps1` + `_WordHost.ps1`） | 产出 `.dotm`，能构建、装载、功能区出现 | **代码已完成，静态验证已过，端到端自动化被这台机器的一个前置条件挡住**：`build-word.ps1` + `_WordHost.ps1`（独立于 `_ExcelHost.ps1`/`_PptHost.ps1`）+ `src/word/code/Core/{modApp,modRibbon,modPublic}.bas` + `src/word/package/customUI/customUI14.xml`。PowerShell 语法、XML 结构、VBA 源码 BOM 编码都已核对；`SaveAs` 格式常量、`DisplayAlerts`/`Hwnd`/`Visible` 等宿主差异都用真实 COM 调用逐条验证过（见上方"Word COM 自动化的实测差异"）。**卡住的地方**：这台机器 Word 的「信任对 VBA 工程对象模型的访问」没开（Excel/PowerPoint 都开了，Word 没有），这是安全设置，不能由自动化脚本代为打开，需要用户手动去 Word 信任中心勾选后才能跑通一次真实构建 |
-| 7（三期第二步） | Word 样板命令 3–5 个（排版清理类优先，见第四节） | 闭环：构建 → 装载 → 功能区 → 执行；撤销走**原生 `Application.UndoRecord`**（比 Excel 简单） | 未开工 |
+| 7（三期第二步） | Word 样板命令 3 个（见第八节设计） | 闭环：构建 → 装载 → 功能区 → 执行；撤销走**原生 `Application.UndoRecord`**（比 Excel 简单） | **代码已完成，逐项用真实 COM 调用验证过底层行为，端到端仍卡在 VBOM 信任**：`word.audit`（只读体检）、`word.cleanSpaces`（Undoable=True，走 UndoRecord）、`word.updateFields`（ConfirmBeforeRun=True）。同时把 `modAction` 按第八节方案拆成 `shared/code/Core/modAction.bas`（RunAction 管线）+ 各宿主 `modActionRegistry.bas`（Excel 的拆分已用 build.ps1 + tests/run-all.ps1 全量验证 409/409，Codex 两轮复审通过；PPT 构建脚本排除了还用不上的 modAction.bas）。Word 这三个命令开发过程中用直接 COM 调用（不经过 VBE 编译，绕开 VBOM 限制）逐个验证了用到的每个 API——过程中真实发现并修了三个坑：①全角空格搜索默认会连带命中半角空格（`Find.MatchByte` 必须显式设 True，不设会误删用户文档里所有正常空格）；②`AscW` 处理段落尾字符时对 U+8000 以上的汉字返回负数，会被"当控制字符砍掉"误判成负数满足 `<32`（改用 `modStr.CodePointOf`，这是文档六已经点名过的坑，写第一版时还是踩了一次）；③`Document.Fields.Update()` 不会刷新目录内容，即使目录被算进 `Fields.Count`，必须额外调 `TablesOfContents(i).Update()`。**仍未验证**：一次完整的 VBE 编译 + 装载真机测试——这台机器 Word 的 VBOM 信任没开，是安全设置，需要用户手动去开 |
 | 8（三期第三步） | Word AI（Excel AI 仓库，第三个 `Office.context.host` 分支） | 参照 PPT AI 的接入方式：新增 `src/word/coordinator.ts`/`blueprint.ts`、`WORD_TOOL_NAMES`、manifest 新增 `Document` Host 块 | **已完成并推送**：`src/word/{coordinator,blueprint}.ts` 镜像 PPT 那两个文件，`WordApi` 用到的每个方法（`body.paragraphs`/`getSelection`/`insertText`/`search`）都用 `@types/office-js` 的类型定义核实过是 1.1 基线，不是猜的版本号。四个工具：`get_document_overview`/`read_paragraph`（read）、`insert_paragraph`/`replace_text`（mutate:structure——理由和 PPT 一致，VBA 侧"Word 原生 UndoRecord 更简单"说的是 COM 自动化那条路，不能套到 Office.js 任务窗格上）。`ChatPane.tsx` 的工具禁用逻辑从二元判断改成三态，`host=unknown` 仍兜底按 Excel 处理。manifest 新增 `Document` Host 块，`office-addin-manifest validate` 三个宿主全过。Codex 两轮复审：第一轮挑出 `replace_text` 的 `find` 参数没校验 255 字符上限（`Body.search` 文档写明的限制），修复后第二轮 PASS。`npx tsc --noEmit`/`npx vitest run`（141/141）/`npm run build` 全绿，已推送。**未验证**：真机在 Word 里侧载打开任务窗格——理论上 Office.js 加载项走 manifest 侧载，不经过 COM 自动化导入 VBA 那条路，不受这台机器 Word VBOM 信任设置的限制，但没有条件实测确认 |
 
 ### 测试要新增的
@@ -314,13 +315,19 @@ src/
 
 ---
 
-## 八、命令集与跨宿主执行管线设计（草案，待确认，尚未实施）
+## 八、命令集与跨宿主执行管线设计
 
-PPT 工具箱（二期）和 Word 工具箱（三期）目前都停在"构建管线骨架"这一步，
+> 状态：**modAction 拆分（8.1）+ Word 首批三个命令（8.3 的 Word 部分）
+> 已实施**。PPT 部分（8.3 的 PPT 三个命令、8.4 提到的 PPT
+> modActionRegistry）仍未开工，留给下一轮。8.1/8.2/8.3 下面的内容是
+> 原始设计草案，保持不动作为决策记录；已实施部分的实际结果和过程中
+> 发现的新问题记在本节末尾的"8.5 实施结果"。
+
+PPT 工具箱（二期）和 Word 工具箱（三期）曾经都停在"构建管线骨架"这一步，
 "样板命令"都没做——不是漏了，是刻意的：没有第二个真实消费者之前，
 硬套 Excel 那套 `modAction`/`clsActionDef` 管线属于没人验证过的抽象。
-现在 PPT 和 Word 同时到了这个节点，是时候把这件事想清楚了。这一节
-只是设计草案，**没有落地任何代码**，等确认后再实施。
+PPT 和 Word 同时到了这个节点后，才把这件事想清楚、写成下面的设计草案
+（**8.1-8.4 是设计时的原始文字，Word 部分已经按这个方案实施**）。
 
 ### 8.1 重新读了一遍 `modAction.bas` 之后发现的关键事实
 
@@ -425,3 +432,71 @@ PPT 沿用已经定好的策略：全部 `Undoable:=False`、`ConfirmBeforeRun:=
   模型行为（这次设计 `word.cleanSpaces`/`UndoRecord` 用的就是这种方式）。
   真正把 VBA 源码导入进 `.dotm` 跑一遍，仍然需要用户手动开一次 Word 的
   「信任对 VBA 工程对象模型的访问」。
+
+### 8.5 实施结果（modAction 拆分 + Word 首批三个命令）
+
+#### modAction 拆分：比设计草案预想的多两处耦合
+
+8.1 只发现了 `RegisterAll`/`Dispatch` 是 Excel 耦合点，实际动手拆分时
+逐行核对又找出两处：`IsActionEnabled`/`IsActionPressed` 内部的
+`Select Case` 分支里，分别藏着 `viz.sparklines`/文件对话框能力探测
+（调 `modCaps.*`）和 `misc.spotlight` 按下状态（调 `modSpotlight.*`）——
+这两个也是 Excel 专属业务模块。处理方式和 `RegisterAll`/`Dispatch`
+同一个技巧：`shared/modAction.IsActionEnabled`/`IsActionPressed` 对
+`core.undoLast` 之外的情况转派给不写前缀的 `ActionExtraEnabled`/
+`ActionExtraPressed`，各宿主的 `modActionRegistry.bas` 里实现。
+
+验证：`build.ps1` 构建产物模块清单核对通过，`tests/run-all.ps1` 全量
+重跑 **409/409**，和文档记录的基线完全一致，零回归。Codex 两轮复审：
+第一轮指出 `modAction.bas` 进 shared 后 `build-ppt.ps1` 会因为 PPT
+工程缺依赖而编译不过（PPT 还没有自己的 `modActionRegistry.bas`/
+`modHost.bas`），修法是 `build-ppt.ps1` 显式排除 `modAction.bas`；
+两轮都是 PASS。
+
+#### Word 首批三个命令：COM 调用逐项验证时踩出的三个真坑
+
+Word 的 VBOM 信任这台机器没开，没法走真正的 VBE 编译，所以每个用到的
+API 都改用不经过 VBA、直接的 PowerShell COM 调用单独验证行为——过程中
+真实发现（不是理论风险）三个问题，都已改正：
+
+1. **`Find.MatchByte` 不显式设 `True`，全角/半角字符会被当成等价**。
+   这台机器装了中文语言包，Word 的 `Find` 默认把全角空格（U+3000）和
+   半角空格当成同一个东西——实测：3 字符的文档里搜 1 个全角空格，
+   命中数算出来是 3，把两个普通半角空格也数进去了。`modClean.bas`
+   如果不设这个属性，"清理全角空格"这个命令会把文档里所有正常空格
+   一起删掉，是会破坏用户数据的真实 bug。修法：每次用 `Find` 之前
+   显式 `f.MatchByte = True`。
+2. **`AscW` 处理段落文字时，对 U+8000 以上的字符返回负数**——这正是
+   文档第六节点名过的坑（"这个坑在 Excel 侧踩过两次，代价是静默删
+   汉字，一律走 `modStr.CodePointOf`"），`modAudit.bas` 判断段落末尾
+   字符是不是控制字符时，第一版写的时候还是先用了 `AscW`，构造一个
+   以 U+9F98（"龘"）结尾的测试段落后复现：`AscW` 返回负数，负数天然
+   满足 `< 32`，会被误判成"控制字符"整段砍掉，静默丢字。改用
+   `modStr.CodePointOf`（内部把负数加 65536 转回正确码点）后重测
+   通过。写档时已经知道这条规矩，实操时还是踩了一次，说明"知道有这条
+   规矩"和"每次新写字符判断代码时真的记得套用"是两回事，光靠文档
+   提醒不够，最终是靠"给每个真实用到的 API 都补一个可验证的用例"
+   这套方法论抓出来的，不是提前想到的。
+3. **`Document.Fields.Update()` 不会刷新目录内容**，即使目录本身被
+   算进 `Fields.Count`（真机测过：只有一个目录时 `Fields.Count` 就是
+   1，容易让人以为"目录也是域，更新域就够了"）。构造"目录建好之后
+   在文档末尾新加一个标题"的场景，只调 `Fields.Update()` 目录文字
+   完全不变；改调 `TablesOfContents(i).Update()` 之后新标题才出现
+   在目录里。`modFields.bas` 的 `word.updateFields` 两步都做，不能
+   只做一步就假设域和目录一起更新了。
+
+除了这三个真问题，另有一处虚惊：一开始以为"`Document.Fields` 不包含
+目录条目，必须分开处理"，后来直接测才发现目录确实被计入 `Fields`，
+只是**被计入不等于被 `Fields.Update()` 真正刷新**——这是两件不同的
+事，第 3 点的坑更细一点，写进最终代码注释里的是修正后的准确说法，
+不是最初的猜测。
+
+**方法论小结**：这三个问题没有一个是靠读文档或者凭经验猜出来的，
+全部是把 VBA 要调的每一行 Office 对象模型 API，原样用 PowerShell
+的 `New-Object -ComObject Word.Application` 复刻一遍、构造针对性的
+边界用例（全角空格混着半角空格、段落以生僻高码点汉字结尾、目录建好
+之后再加新标题）跑出来的。这台机器 VBOM 信任被卡住反而逼着把每个
+API 调用单独拆出来验证，比"整体导入进 VBE 编译一次，能跑就当对"
+覆盖到的边界情况更细——**这不是退而求其次的将就，抓到的三个问题里
+至少两个（MatchByte、Fields vs TablesOfContents）就算真的能编译
+进 VBE 里跑，普通的手工冒烟测试也不一定测得到这么细的边界**。
