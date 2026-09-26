@@ -50,7 +50,7 @@ $helpIds = @(
     ForEach-Object { $_.Matches[0].Groups[1].Value }
 )
 
-$modAction = Join-Path $RepoRoot "src\excel\code\Core\modAction.bas"
+$modAction = Join-Path $RepoRoot "src\excel\code\Core\modActionRegistry.bas"
 $regIds = @(
     Select-String -LiteralPath $modAction -Pattern 'RegisterAction\s+"([A-Za-z]+\.[A-Za-z]+)"' |
     ForEach-Object { $_.Matches[0].Groups[1].Value }
