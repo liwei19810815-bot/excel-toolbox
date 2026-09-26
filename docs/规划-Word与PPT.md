@@ -1,7 +1,7 @@
 # 规划：Word 与 PowerPoint 支持
 
-> 状态：**二期进行中**（第 1 步已完成，见第五节）。三期 Word 仍是规划，未开工。
-> 本文只定方向和判据，不是承诺的排期。
+> 状态：**二期已完成并推送**（PPT 工具箱骨架 + PPT AI）。**三期进行中**
+> （Word 构建管线骨架已落地，见第五节）。本文只定方向和判据，不是承诺的排期。
 
 ## 为什么当初砍掉，现在能捡回来
 
@@ -60,7 +60,7 @@ UI 上如实标「不可撤销」。`clsActionDef` 现有的三个标志
 | 宿主 | COM | 产物 | SaveAs 格式值 |
 |---|---|---|---|
 | Excel | `Excel.Application` | `.xlam` | `xlOpenXMLAddIn` = 55 |
-| Word | `Word.Application` | `.dotm` | `wdFormatXMLTemplateMacroEnabled` = 13 |
+| Word | `Word.Application` | `.dotm` | `wdFormatXMLTemplateMacroEnabled` = 15（原计划写的 13 是错的，那其实是 `wdFormatXMLDocumentMacroEnabled`（`.docm`），已用真实 COM 调用验证：`SaveAs(path, 15)` 产出的包 `[Content_Types].xml` 里同时匹配 `template` 和 `macroEnabled`，`SaveAs(path, 13)` 没试但 13 明确是文档不是模板，不能用） |
 | PowerPoint | `PowerPoint.Application` | `.ppam` | `ppSaveAsOpenXMLAddin` = 30 |
 
 三者都是 OOXML zip，`customUI` 注入代码可以原样复用。
@@ -105,6 +105,42 @@ PowerShell COM 自动化实测出来的，构建脚本要按这些写，别照�
 - **`%APPDATA%\Microsoft\Addins` 已经是 PowerPoint 的信任位置**——
   和 Excel 的 `%APPDATA%\Microsoft\AddIns`（大小写不同、注意是两个
   不同目录）是同一个思路，装 PPT 加载项应该放这里。
+
+### Word COM 自动化的实测差异（用真实 COM 调用逐条验证过）
+
+三期开工前先拿这台机器的 Word 16.0 实测了一遍，结论是：**Word 比
+PowerPoint 更接近 Excel**，但不完全一样，构建脚本要按这些写：
+
+- **`Application.Visible` 可以直接设 `False`**——和 Excel 一致，不像
+  PowerPoint 那样会抛异常，不需要 `WindowState` 变通。
+- **`Application.EnableEvents` 属性不存在**——和 PowerPoint 一样，这是
+  Excel 专有的，构建脚本对应那一行整个跳过；但 `ScreenUpdating` 正常
+  存在、可以设置。
+- **`Application.DisplayAlerts` 是数值 `wdAlertsNone = 0`**——不是
+  PowerPoint 那种从 1 开始的 `PpAlertLevel` 枚举，也不是 Excel 的布尔，
+  三个宿主三种写法，不能互相抄数值。
+- **没有 `Application.Hwnd`**——真机测试过，即使已经打开一个可见文档，
+  `$w.Hwnd` 读出来也是空值。Word 不能像 Excel 那样反查 PID，必须走
+  PowerPoint 那套"创建前后进程快照比对"方案（`_WordHost.ps1` 的
+  `Get-WordIdentity`，直接照抄 `_PptHost.ps1` 修好之后的版本——快照
+  必须由调用方在 `New-Object` **之前**拍好传进来，不能在函数内部现拍，
+  这是 PPT 那边被 Codex 挑出过的真实 bug，Word 这边从一开始就按正确
+  顺序写）。
+- **`wdFormatXMLTemplateMacroEnabled` 正确值是 15，不是 13**——见上方
+  "构建产物"表格的脚注，已用真实 `SaveAs` 调用验证过产出文件的
+  `[Content_Types].xml` 同时匹配 `template` 和 `macroEnabled`。
+- **customUI 注入沿用 PPT 的"完全重建 zip"做法**——没有反过来验证
+  "Word 的 `.dotm` 是否也存在 Excel 那种原地 Update 会被拒绝加载"的
+  问题，直接用已经证明安全的重建做法，不重复冒险验证。
+- **「信任对 VBA 工程对象模型的访问」这台机器上 Word 没开**——Excel
+  和 PowerPoint 的 `HKCU\...\Excel\Security\AccessVBOM` /
+  `...\PowerPoint\Security\AccessVBOM` 都是 `1`，唯独 Word 的对应键
+  不存在。这是安全相关的注册表设置，不能由自动化流程代自己打开，
+  需要用户在 Word 里手动开启（文件→选项→信任中心→信任中心设置→
+  宏设置→勾选"信任对 VBA 工程对象模型的访问"）。**这也是当前
+  `build-word.ps1` 没有一次完整自动化跑通记录的原因**——脚本本身
+  的 PowerShell 语法、customUI 注入、进程识别逻辑都已经过静态审查
+  和 COM 调用抽样验证，只差这一步用户手动开关。
 
 ### 已解决：ribbon 版 .ppam 必须完全重建 zip，不能用 ZipFile 的 Update 模式原地改
 
@@ -232,7 +268,9 @@ src/
 | 3 | PPT 样板命令 3–5 个（只读检查类优先） | 闭环：构建 → 装载 → 功能区 → 执行；撤销一栏标「不可撤销」并强制确认 | 未开工 |
 | 4 | PPT 命令集补齐 | `check-help`、`check-ribbon`、`check-imagemso` 针对 PPT 全绿 | 未开工 |
 | 5 | PPT AI（Excel AI 仓库） | 任务窗格怎么接入 PPT——沿用同一 manifest 按 `Office.context.host` 分流，还是独立产品线 | **架构已定并落地**：沿用同一 manifest/bundle，运行时按 `Office.context.host` 分流（`src/store/host.ts`），复用 chat/session/settings/sidecar 客户端（本来就是宿主无关的）。新增 `src/powerpoint/{coordinator,blueprint}.ts`、四个 PPT 工具（`get_presentation_overview`/`read_slide`/`add_text_box`/`add_slide`）、`EXCEL_TOOL_NAMES`/`POWERPOINT_TOOL_NAMES` 按宿主过滤工具列表、manifest 新增 `Presentation` Host 块。`npx tsc --noEmit`/`npx vitest run`（130/130）/`npm run build` 全过，已提交（`354fda8`，未推送）。**两项未完成**：①这台机器 PowerPoint 环境不稳定，没做过真机侧载验证；②Codex 独立验收三次尝试都因账号侧模型配置问题失败（"gpt-6-luna"/"gpt-5.3-codex" 均报 "not supported when using Codex with a ChatGPT account"），需要用户跑 `/codex:setup` 排查，推送前应补这轮验收 |
-| 6（三期） | Word 构建管线 + 样板命令 | 闭环同上，撤销走**原生 `Application.UndoRecord`**（比 Excel 简单） | 留给三期，不在本期范围 |
+| 6（三期第一步） | Word 构建管线（独立脚本 `build-word.ps1` + `_WordHost.ps1`） | 产出 `.dotm`，能构建、装载、功能区出现 | **代码已完成，静态验证已过，端到端自动化被这台机器的一个前置条件挡住**：`build-word.ps1` + `_WordHost.ps1`（独立于 `_ExcelHost.ps1`/`_PptHost.ps1`）+ `src/word/code/Core/{modApp,modRibbon,modPublic}.bas` + `src/word/package/customUI/customUI14.xml`。PowerShell 语法、XML 结构、VBA 源码 BOM 编码都已核对；`SaveAs` 格式常量、`DisplayAlerts`/`Hwnd`/`Visible` 等宿主差异都用真实 COM 调用逐条验证过（见上方"Word COM 自动化的实测差异"）。**卡住的地方**：这台机器 Word 的「信任对 VBA 工程对象模型的访问」没开（Excel/PowerPoint 都开了，Word 没有），这是安全设置，不能由自动化脚本代为打开，需要用户手动去 Word 信任中心勾选后才能跑通一次真实构建 |
+| 7（三期第二步） | Word 样板命令 3–5 个（排版清理类优先，见第四节） | 闭环：构建 → 装载 → 功能区 → 执行；撤销走**原生 `Application.UndoRecord`**（比 Excel 简单） | 未开工 |
+| 8（三期第三步） | Word AI（Excel AI 仓库，第三个 `Office.context.host` 分支） | 参照 PPT AI 的接入方式：新增 `src/word/coordinator.ts`/`blueprint.ts`、`WORD_TOOL_NAMES`、manifest 新增 `Document` Host 块 | 未开工 |
 
 ### 测试要新增的
 
