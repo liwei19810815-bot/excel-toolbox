@@ -311,3 +311,117 @@ src/
 
 **风险最高的一步是第 1 步**：动 `modAction` 和 `modUndo` 意味着碰
 整个执行管线。判据必须是"Excel 300 条断言一条不少"，不达标就不往下走。
+
+---
+
+## 八、命令集与跨宿主执行管线设计（草案，待确认，尚未实施）
+
+PPT 工具箱（二期）和 Word 工具箱（三期）目前都停在"构建管线骨架"这一步，
+"样板命令"都没做——不是漏了，是刻意的：没有第二个真实消费者之前，
+硬套 Excel 那套 `modAction`/`clsActionDef` 管线属于没人验证过的抽象。
+现在 PPT 和 Word 同时到了这个节点，是时候把这件事想清楚了。这一节
+只是设计草案，**没有落地任何代码**，等确认后再实施。
+
+### 8.1 重新读了一遍 `modAction.bas` 之后发现的关键事实
+
+之前的规划文档把 `modAction` 整体归类为"中等耦合，抽出宿主调用后可进
+shared"，这次逐行核对发现耦合比想象的更集中：
+
+- `RunAction`（前置校验 → 确认框 → 高速模式 → 撤销事务 → 派发 →
+  提交/回滚 → 恢复环境 → 遥测）**完全不碰 Excel 对象**，只调
+  `modHost.*`、`modRibbon.*`、`modTelemetry.*`、`clsActionDef`、还有
+  两个"自己项目里必须存在"的自由函数：`RegisterAll()`（注册命令元数据）
+  和 `Dispatch(actionId)`（真正执行，返回结果字符串）。
+- 只有 `RegisterAll` 里各条 `RegisterAction` 调用之间夹杂的字符串（纯数据，
+  无耦合）和 `Dispatch` 的 `Select Case` 分支体（`Selection`/`ActiveWorkbook`/
+  `ActiveSheet` + `modText`/`modSheets`/... 这些 Excel 专属业务模块）
+  是真正的 Excel 耦合点。
+
+这意味着 `modAction.bas` 可以**按现有的"同名模块"套路整个拆开**，
+不需要发明新机制：
+
+```
+shared/code/Core/modAction.bas
+    RunAction / SetSilent / IsSilent / LastMessage /
+    RegisterAction（写入注册表的辅助函数）/ GetAction / IsActionEnabled /
+    ActionLabel ——这些【一字不改】原样搬过去，因为本来就没碰 Excel 对象
+
+excel/code/Core/modActionRegistry.bas（新拆出来，原 modAction.bas 里
+    RegisterAll + Dispatch 那部分整体平移，函数名不变）
+word/code/Core/modActionRegistry.bas（新写，Word 版 RegisterAll + Dispatch）
+ppt/code/Core/modActionRegistry.bas（新写，等真的要给 PPT 做命令时再写）
+```
+
+`RunAction` 调用 `RegisterAll()`/`Dispatch(actionId)` 时不写模块前缀，
+VBA 按"当前工程内查找同名过程"解析——和 `modHost` 那套"每个工程一份
+同名实现"是同一个技巧，`RunAction` 完全不用知道自己调的是哪个宿主的
+`Dispatch`。
+
+### 8.2 Word 能不能用原生 `UndoRecord`：能，但只能用一半
+
+实测确认过两件事（本轮已用真实 COM 调用验证，见第二节"Word COM 自动化
+的实测差异"）：
+
+1. `Application.UndoRecord.StartCustomRecord(name)` /
+   `EndCustomRecord()` 真的能把中间任意多次编辑合并成**一条**原生
+   撤销记录，用户按一次 Ctrl+Z 就能整体撤销——这部分能用，而且好用，
+   Word 命令可以标 `Undoable:=True`，`Host_BeginUndo`/`Host_CommitUndo`
+   包一层 `StartCustomRecord`/`EndCustomRecord` 就行。
+2. 但 Office 没有暴露"查询当前是否有能撤销的记录"或"看一眼上一条
+   撤销记录叫什么名字"的 API——`UndoRecord` 是纯粹的"开始记、结束记"，
+   不能反向查询。这意味着 Excel 那套由 `modUndo.CanUndo()`/`PeekLabel()`
+   驱动的**工具箱自己的"撤销上一步"按钮**（`core.undoLast`，靠这两个
+   函数决定按钮是否可点、按钮上写哪个操作名）在 Word 上**做不出来**，
+   不是没设计好，是 Office 本身没给这个能力。
+
+**结论**：Word 版 `modHost` 里 `Host_BeginUndo`/`Host_CommitUndo` 有
+真实实现（包一层 `UndoRecord`），但 `Host_CanUndo`/`Host_PeekLabel`/
+`Host_UndoLast` 老实返回"不支持"（`False`/空字符串/空操作），Word 的
+`RegisterAll` 里**不注册 `core.undoLast` 这个命令**，customUI 里也不放
+这个按钮——用户改动后自己按 Ctrl+Z，不通过工具箱按钮撤销。这样
+`RunAction` 里那句无条件的 `modRibbon.RefreshControl "btnUndoLast"`
+不会报错（控件不存在时 `RefreshControl` 按现有实现直接空操作），
+但也不会做任何事，是安全的。
+
+PPT 沿用已经定好的策略：全部 `Undoable:=False`、`ConfirmBeforeRun:=True`，
+不受这次讨论影响。
+
+### 8.3 建议的首批命令（每个宿主 3 个，覆盖 `RunAction` 的三条分支）
+
+选 3 个而不是文档里列的 10-12 个候选，是为了先把"构建 → 装载 →
+功能区 → 执行 → 撤销/确认"这条完整链路在真机上跑通一次，跑通之后
+按同样的模式批量补齐候选清单里剩下的命令，风险和工作量都可预估。
+
+**Word**（覆盖只读 / 原生撤销 / 强制确认三条路径）：
+
+| actionId | 做什么 | Undoable | ConfirmBeforeRun | 为什么选它 |
+|---|---|---|---|---|
+| `word.audit` | 体检：统计空段落、连续空格、手动换行符（非段落符）、超长段落，只报告不改动 | False | False | 只读，零风险，第一个验证"构建→装载→执行"链路整体走通 |
+| `word.cleanSpaces` | 清理多余空格（含全角空格/不间断空格/零宽字符），逻辑上和 Excel 的 `text.cleanSpaces` 是同一类需求 | **True**（用 `UndoRecord` 分组） | False | 第一个验证 `Host_BeginUndo`/`Host_CommitUndo` 包一层 `UndoRecord` 是否真的按预期工作 |
+| `word.updateFields` | 更新全文所有域（含目录），对应文档里"生成/更新目录、更新所有域"这条候选 | False（域更新后的撤销语义复杂，不承诺能撤销，老实标不可撤销） | True | 验证 `ConfirmBeforeRun` 强制确认这条路径，且是文档候选列表里价值较高的一条 |
+
+**PowerPoint**（延续"全部不可撤销"策略，覆盖只读 / 强制确认两条路径）：
+
+| actionId | 做什么 | Undoable | ConfirmBeforeRun | 为什么选它 |
+|---|---|---|---|---|
+| `ppt.audit` | 检查：超出版心的对象、字号过小、空占位符，只报告不改动 | False | False | 只读，零风险，同上验证链路 |
+| `ppt.exportNotes` | 导出所有页的备注为一个文本文件 | False | False | 只读（不改动原文件，只是导出），文档候选列表里价值较高的一条 |
+| `ppt.replaceText` | 批量替换全文文本 | False | **True** | 会真的改动内容，PPT 没有任何撤销机制，必须强制确认——验证这条路径 |
+
+### 8.4 不在这轮做的
+
+- 不把 `excel/code/Core/modActionRegistry.bas` 拆分本身当成"零风险"操作——
+  这是对已验收的 Excel 执行管线做结构性改动，即使理论上只是把代码原样
+  搬到另一个文件、函数签名和调用关系不变，仍然要求 **Excel 现有全部
+  断言一条不少** 才能算过，和当初"重组 + modHost 抽象"那一步同一个判据。
+- 不做 PPT 的具体命令实现（`ppt/code/Core/modActionRegistry.bas` 只搭
+  骨架，或者等确认要不要现在一起做）——本节先把 Word 的三个样板命令
+  做完、验证过手动/真机可用之后，再决定是否同一轮顺手把 PPT 的三个
+  也做了，还是分开验证。
+- 不假设 Word 首批三个命令能在这台机器自动化验证到底——`build-word.ps1`
+  仍然卡在 VBOM 信任那一步（见第五节），命令写完之后能做的是：PowerShell
+  语法检查、VBA 源码 BOM 编码检查、`Dispatch` 分支的手工代码走查，以及
+  可能的情况下用不需要 VBProject 访问权限的纯 COM 调用验证 Word 对象
+  模型行为（这次设计 `word.cleanSpaces`/`UndoRecord` 用的就是这种方式）。
+  真正把 VBA 源码导入进 `.dotm` 跑一遍，仍然需要用户手动开一次 Word 的
+  「信任对 VBA 工程对象模型的访问」。
