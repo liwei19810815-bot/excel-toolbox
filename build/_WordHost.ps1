@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     创建一个【确认是真 Microsoft Word】的 COM 实例。
 

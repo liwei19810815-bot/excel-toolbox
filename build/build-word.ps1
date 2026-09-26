@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     src\shared\code + src\word\code + src\word\package  ->  dist\WordToolbox.dotm
 
