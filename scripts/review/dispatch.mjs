@@ -92,8 +92,18 @@ function runWithFallback(index) {
     const unsupported = /not supported|unsupported model|模型.*不支持|不支持.*模型/.test(normalized);
     if (unsupported && index + 1 < models.length) return runWithFallback(index + 1);
 
-    const failed = code !== 0 || /\b(fail|blocking|阻塞|未通过)\b/.test(normalized);
-    const passed = !failed && /\b(pass|passed|通过|approved)\b/.test(normalized);
+    // 【判断结论只能看最后一条 agent_message，不能扫整段 rawOutput】。
+    // rawOutput 是完整 JSONL 事件流，中间一大堆 command_execution 项
+    // 经常带 "status":"failed"（比如某次 git 找不到、retry 了几次才
+    // 找对路径——这种事在这套复审脚本自己的调试历史里反复出现过），
+    // 对全文做 /fail/ 正则会把这些噪音当成"复审结论是 FAIL"，
+    // 真实撞过一次：Codex 的 agent_message 原文明明是
+    // "PASS。......未发现新的逻辑偏差。"，只因为前面某条工具调用
+    // 打了 "status":"failed"，就被判成了 failed。
+    const verdictText = lastAgentMessageText(stdout) ?? output;
+    const verdictLower = verdictText.toLowerCase();
+    const failed = code !== 0 || /\b(fail|blocking|阻塞|未通过)\b/.test(verdictLower);
+    const passed = !failed && /\b(pass|passed|通过|approved)\b/.test(verdictLower);
     currentModel = model;
     finish(
       passed ? 'passed' : failed ? 'failed' : 'error',
@@ -102,6 +112,24 @@ function runWithFallback(index) {
       code,
     );
   });
+}
+
+// stdout 是 --json 模式下的 JSONL 事件流，逐行解析找最后一条
+// {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+// 解析不出来（比如某个模型不支持 --json、输出不是合法 JSONL）就返回
+// null，调用方回退到扫整段原始输出。
+function lastAgentMessageText(jsonlStdout) {
+  let last = null;
+  for (const line of jsonlStdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let obj;
+    try { obj = JSON.parse(trimmed); } catch { continue; }
+    if (obj?.type === 'item.completed' && obj?.item?.type === 'agent_message' && typeof obj.item.text === 'string') {
+      last = obj.item.text;
+    }
+  }
+  return last;
 }
 
 function writeResult(result) {
