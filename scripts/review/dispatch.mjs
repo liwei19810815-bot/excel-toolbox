@@ -102,9 +102,23 @@ function runWithFallback(index) {
     // 打了 "status":"failed"，就被判成了 failed。
     const verdictText = lastAgentMessageText(stdout) ?? output;
     const verdictLower = verdictText.toLowerCase();
-    const failed = code !== 0 || /\b(fail|blocking|阻塞|未通过)\b/.test(verdictLower);
-    const passed = !failed && /\b(pass|passed|通过|approved)\b/.test(verdictLower);
+
+    // 【账号用量限额打断 ≠ 复审 FAIL】：ChatGPT 账号的 Codex 用量用尽时，
+    // rawOutput 里会出现 "You've hit your usage limit" 这条错误 + 一条
+    // "Review was interrupted. Please re-run..." 的 agent_message——
+    // 这条消息不含 pass/fail 关键词，会落进下面 failed=false 也
+    // passed=false 的 'error' 分支，这是对的；但如果以后改动这段正则、
+    // 不小心让 "interrupted" 之类的词命中了 fail 分支，就会把"额度用尽"
+    // 误判成"代码有问题"，两者必须分开报，不能混在一起当成同一种失败。
+    const usageLimited = /hit your usage limit|review was interrupted/.test(verdictLower);
+
+    const failed = !usageLimited && (code !== 0 || /\b(fail|blocking|阻塞|未通过)\b/.test(verdictLower));
+    const passed = !usageLimited && !failed && /\b(pass|passed|通过|approved)\b/.test(verdictLower);
     currentModel = model;
+    if (usageLimited) {
+      finish('error', 'Codex 账号用量限额用尽，复审被打断（不是代码问题，不要据此判定 FAIL）。', output, code);
+      return;
+    }
     finish(
       passed ? 'passed' : failed ? 'failed' : 'error',
       passed ? 'Codex 复审通过。' : failed ? 'Codex 复审发现问题。' : '无法从 Codex 输出中确定复审结论。',
