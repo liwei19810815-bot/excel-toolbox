@@ -324,15 +324,35 @@ src/
 > （见第二节"已解决：ribbon 版 .ppam..."上方、以及历史记录里
 > "重启电脑也没能根治"那次排查），连最基本的
 > `New-Object -ComObject PowerPoint.Application` + `Quit()` 都会挂死
-> 或报 `CO_E_SERVER_EXEC_FAILURE`，清理 `Resiliency\StartupItems`
-> 注册表键（上次的临时解法）这次也不起作用。Word 首批三个命令能在
-> VBOM 信任卡住的情况下还继续推进，是因为可以绕开 VBE 编译、直接用
-> PowerShell COM 调用逐个验证每个 API 行为；PPT 这次连这条退路都没有
-> ——COM 本身连不稳定的连接都建不起来，没有任何验证手段，贸然写三个
-> 命令等于纯猜代码，风险和"没有调用方的抽象"是同一类问题反过来的
-> 版本，所以这一轮没有写。8.1/8.2/8.3 下面的内容是原始设计草案，
-> 保持不动作为决策记录；已实施部分的实际结果和过程中发现的新问题记在
-> 本节末尾的"8.5 实施结果"。
+> 或报 `CO_E_SERVER_EXEC_FAILURE`。这一轮比上次多查出一层：用真实
+> Office 修复（`OfficeClickToRun.exe scenario=Repair RepairType=
+> QuickRepair`，注意不是 `OfficeC2RClient.exe`，两者命令行参数不通用）
+> 之后，Windows 事件日志（Application 日志，Provider = "Microsoft
+> Office 16"，事件 ID 2001）第一次抓到了具体原因："Rejected Safe Mode
+> action：PowerPoint 上次启动失败。安全模式可以帮助解决此问题……是否
+> 要在安全模式下启动？"——COM 自动化启动的 PowerPoint 进程处在一个
+> 非交互式 window station，这个"是否安全模式启动"确认框没有任何用户
+> 能点到，DCOM 激活调用干等到固定超时（稳定复现在 ~15.6 秒）后失败。
+> 尝试过删除整个 `HKCU\Software\Microsoft\Office\16.0\PowerPoint`
+> 注册表键（含 `Resiliency` 子树）强制重建默认设置，第一次重建后的
+> 实例确实用 `[Runtime.InteropServices.Marshal]::GetActiveObject(...)`
+> 连上了，但处于半残状态（`Presentations.Count` 能读，`Presentations.
+> Add()` 报"无法对 Null 值调用方法"），说明它自己也没有正常走完启动
+> 流程；这个残实例只要一被 `Stop-Process -Force` 杀掉，Office 自己的
+> "上次启动失败"标记立刻重新出现，下一次启动又卡回同一个安全模式确认
+> 框——形成了一个杀了就复现、不杀就没法继续测的死循环，而且这个标记
+> 显然不是存在这次已经删过的 `HKCU\...\PowerPoint\Resiliency` 下（删
+> 了整个键，问题照样在下一次启动复现），大概率在 Office Click-to-Run
+> 自己管理的会话/崩溃跟踪状态里（`%ProgramData%\Microsoft\ClickToRun`
+> 或者 Windows Restart Manager / Application Recovery API 那一层），
+> 不是常规注册表能清掉的。已经把改动过的注册表状态还原回修复前的备份。
+> Word 首批三个命令能在 VBOM 信任卡住的情况下还继续推进，是因为可以
+> 绕开 VBE 编译、直接用 PowerShell COM 调用逐个验证每个 API 行为；
+> PPT 这次连这条退路都没有——COM 本身连不稳定的连接都建不起来，没有
+> 任何验证手段，贸然写三个命令等于纯猜代码，风险和"没有调用方的抽象"
+> 是同一类问题反过来的版本，所以这一轮没有写。8.1/8.2/8.3 下面的内容
+> 是原始设计草案，保持不动作为决策记录；已实施部分的实际结果和过程中
+> 发现的新问题记在本节末尾的"8.5 实施结果"。
 
 PPT 工具箱（二期）和 Word 工具箱（三期）曾经都停在"构建管线骨架"这一步，
 "样板命令"都没做——不是漏了，是刻意的：没有第二个真实消费者之前，
