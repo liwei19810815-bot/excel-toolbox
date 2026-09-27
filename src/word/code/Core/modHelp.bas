@@ -26,6 +26,15 @@ Public Function ShowFor(ByVal actionId As String) As String
         Case "word.updateFields"
             msg = "「更新域」：更新全文所有域（含目录），域更新后的" & _
                   "撤销语义复杂，不承诺能撤销，执行前会要求确认。"
+        Case "word.removeEmptyParagraphs"
+            msg = "「清理多余空行」：把连续 2 个及以上的空行压缩成 1 个，" & _
+                  "孤立的单个空行会保留，合并成一条原生撤销记录。"
+        Case "word.replaceText"
+            msg = "「批量替换」：全文查找替换（精确匹配，最多 255 字符，" & _
+                  "不支持通配符）。不承诺能撤销，执行前会要求确认。"
+        Case "word.acceptAllRevisions"
+            msg = "「接受所有修订」：接受文档里全部的修订标记，" & _
+                  "合并成一条原生撤销记录。"
         Case Else
             msg = "这条命令还没有写帮助正文。"
     End Select

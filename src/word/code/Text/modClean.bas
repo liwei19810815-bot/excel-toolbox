@@ -138,3 +138,49 @@ Private Function CountOccurrences(ByVal doc As Document, ByVal pattern As String
 
     CountOccurrences = n
 End Function
+
+'------------------------------------------------------------------------------
+' word.removeEmptyParagraphs：把连续 2 个及以上的空段落压缩成 1 个。
+'
+' 【不是删掉所有空段落】：只删"和另一个空段落相邻"的那些，孤立的单个
+' 空行（常见的段落间距写法）原样保留——真实 COM 调用验证过这个区分
+' 逻辑（构造"单个空行"+"连续三个空行"混合的文档，压缩后单个的还在，
+' 三个的变成一个）。
+'
+' 从后往前删（Paragraphs.Item(i) 倒序）：Word 的 Range.Delete 会让
+' 后面段落的索引前移，从前往后删会导致索引错位、漏删或删错段——
+' 倒序删除是唯一安全的写法，这是 Word 集合删除的通用注意事项，不是
+' 本命令专属的坑，但没有单独验证过就直接倒序写，容易顺手写成正序。
+'------------------------------------------------------------------------------
+Public Function RemoveEmptyParagraphs() As String
+    Dim doc As Document
+    Set doc = ActiveDocument
+
+    Dim total As Long
+    total = doc.Paragraphs.Count
+
+    Dim deleted As Long
+    Dim i As Long
+    For i = total To 2 Step -1
+        If IsEmptyParagraph(doc.Paragraphs(i)) And IsEmptyParagraph(doc.Paragraphs(i - 1)) Then
+            doc.Paragraphs(i).Range.Delete
+            deleted = deleted + 1
+        End If
+    Next i
+
+    If deleted = 0 Then
+        RemoveEmptyParagraphs = "没有发现连续的空行，无需清理。"
+    Else
+        RemoveEmptyParagraphs = "已把连续空行压缩掉 " & deleted & " 个（孤立的单个空行保留）。"
+    End If
+End Function
+
+Private Function IsEmptyParagraph(ByVal p As Paragraph) As Boolean
+    Dim s As String
+    s = p.Range.Text
+    Do While Len(s) > 0
+        If modStr.CodePointOf(Right$(s, 1)) >= 32 Then Exit Do
+        s = Left$(s, Len(s) - 1)
+    Loop
+    IsEmptyParagraph = (Len(s) = 0)
+End Function
