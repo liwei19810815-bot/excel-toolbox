@@ -150,7 +150,18 @@ End Function
 ' 从后往前删（Paragraphs.Item(i) 倒序）：Word 的 Range.Delete 会让
 ' 后面段落的索引前移，从前往后删会导致索引错位、漏删或删错段——
 ' 倒序删除是唯一安全的写法，这是 Word 集合删除的通用注意事项，不是
-' 本命令专属的坑，但没有单独验证过就直接倒序写，容易顺手写成正序。
+' 本命令专属的坑，但没有单独验证过就直接倒序写，容易顺手写成正样。
+'
+' 【表格里的段落必须排除，这是 Codex 复审挑出的真实 bug】：表格每个
+' 单元格内部也是一个（或多个）段落，Range.Text 同样以 Chr(13)/Chr(7)
+' 结尾，会被 IsEmptyParagraph 判定为"空段落"；而 Document.Paragraphs
+' 会把相邻单元格的段落连续枚举出来，一个普通的 2x2 空表格就会产生
+' 4-5 个连续的"空段落"，原来的逻辑会把它们当成"连续空行"整体删掉，
+' 直接删穿表格结构。真实构造过一个"正文—2x2表格—正文"的文档验证过：
+' 表格内 5 个段落全部 inTable=True 且连续为空，不排除的话会被全部
+' 判定为可压缩的连续空行。用 Range.Information(wdWithInTable) 排除，
+' 两个判断参数都不会抛错（不像 modAudit 那个 AscW 的坑），所以这里
+' 用一行 And 组合是安全的，不需要拆成嵌套 If。
 '------------------------------------------------------------------------------
 Public Function RemoveEmptyParagraphs() As String
     Dim doc As Document
@@ -162,7 +173,9 @@ Public Function RemoveEmptyParagraphs() As String
     Dim deleted As Long
     Dim i As Long
     For i = total To 2 Step -1
-        If IsEmptyParagraph(doc.Paragraphs(i)) And IsEmptyParagraph(doc.Paragraphs(i - 1)) Then
+        If IsEmptyParagraph(doc.Paragraphs(i)) And IsEmptyParagraph(doc.Paragraphs(i - 1)) And _
+           Not doc.Paragraphs(i).Range.Information(wdWithInTable) And _
+           Not doc.Paragraphs(i - 1).Range.Information(wdWithInTable) Then
             doc.Paragraphs(i).Range.Delete
             deleted = deleted + 1
         End If
