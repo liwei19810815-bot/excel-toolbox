@@ -28,7 +28,7 @@ Public Sub RegisterAll()
     modAction.RegisterAction "core.about", "关于", "", _
                    Undoable:=False, RequiresWorkbook:=False
     modAction.RegisterAction "core.help", "帮助", _
-                   "打开使用帮助：每个功能什么时候用、怎么用、有什么坑", _
+                   "在浏览器打开使用帮助：每个功能什么时候用、怎么用、有什么坑", _
                    Undoable:=False, RequiresWorkbook:=False
     modAction.RegisterAction "core.resetEnv", "环境复位", _
                    "恢复屏幕刷新、自动重算、事件响应和状态栏。" & _
@@ -203,7 +203,7 @@ Public Function Dispatch(ByVal actionId As String) As String
         Case "core.resetEnv":  modHost.Host_FastModeReset
         Case "core.selfTest":  Dispatch = modApp.AboutText() & vbCrLf & vbCrLf & "加载宏工作正常。"
         Case "core.about":     Dispatch = modApp.AboutText()
-        Case "core.help":      Dispatch = modHelp.ShowPane()
+        Case "core.help":      Dispatch = modHelp.ShowAll()
 
         ' --- M1 文本与单元格 ---
         Case "text.cleanSpaces":      Dispatch = modText.CleanSpaces(Selection)

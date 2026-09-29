@@ -24,34 +24,14 @@ Private Const HELP_SHEET As String = "_Help"
 ' 对外入口
 '==============================================================================
 
-'------------------------------------------------------------------------------
-' 打开右侧帮助侧边栏。功能区「帮助」按钮走这里。
+' 生成完整 HTML 并用默认浏览器打开。功能区「帮助」按钮走这里。
+' 成功返回空串，失败返回原因。
 '
-' 【它不是 Office 原生的任务窗格】：真正的任务窗格只有 COM 加载项能创建，
-' 纯 VBA 的 .xlam 拿不到那个接口。这里是一个贴在右缘的无模式窗体，
-' 能常驻、能边看边操作，但不会把表格区域挤窄。
-'
-' 完整 HTML 那条路保留着（侧边栏底部有入口），要打印或全文检索时更合适。
-'------------------------------------------------------------------------------
-Public Function ShowPane(Optional ByVal entryId As String = vbNullString) As String
-    ' 静默模式（回归测试）里绝不能弹窗体：它会一直等在那儿，把测试挂死
-    If modAction.IsSilent() Then Exit Function
-
-    On Error GoTo Failed
-
-    frmHelpPane.DockRight
-    ' 带了条目就直接定位过去——功能区的「帮助」是总览，
-    ' 而命令执行失败时的「查看帮助」要落到出问题的那一条上。
-    If Len(entryId) > 0 Then frmHelpPane.ShowEntry entryId
-    frmHelpPane.Show vbModeless
-    Exit Function
-
-Failed:
-    ' 侧边栏开不出来时退回浏览器版本，至少让用户看得到帮助
-    ShowPane = ShowAll()
-End Function
-
-' 生成完整 HTML 并用默认浏览器打开。成功返回空串，失败返回原因。
+' 【原来有一个贴在右缘的侧边栏窗体（frmHelpPane）】：能常驻、边看边操作，
+' 不挤表格区域。用户反馈更希望"帮助"直接跳浏览器（完整、可搜索、可打印，
+' 不占 Excel 窗口空间），所以把侧边栏整个去掉了，"帮助"和"查看帮助"
+' （命令执行失败时的入口）现在走同一条路——都是 ShowAll/ShowFor 直接
+' 打开浏览器，不再有两套呈现方式并存、要分别维护的问题。
 ' 【调用方必须看返回值】——静默丢掉的话，用户点了按钮什么都不会发生。
 Public Function ShowAll() As String
     Dim path As String
